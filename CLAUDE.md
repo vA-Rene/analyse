@@ -1,0 +1,47 @@
+# Fit Dashboard
+
+Persönliches E-Paper-Dashboard (Gesundheit, Lauftraining, Wetter) für das Seeed TRMNL 7.5" DIY Kit.
+Alles läuft auf dem ESP32, kein eigener Server. Nur freie APIs. Kommunikation mit dem Nutzer auf Deutsch.
+
+## Struktur
+
+- `FitDashboard/`: Arduino-Firmware (der eigentliche Code)
+  - `FitDashboard.ino`: Setup/Loop, WLAN, Zeit, Akku, Tasten, Setup-Portal, Datenabruf, Light Sleep
+  - `config.h`: Ort, Ziele, Puls-Werte, Intervalle; `secrets.h` (gitignored, Vorlage `secrets.example.h`)
+  - `model.h` (Datenstrukturen), `parse.h` (JSON-Filter + Parser), `metrics.h` (TRIMP/Fitness/Ermüdung, Infekt-Check, Lauffenster, Empfehlung, Prognosen), `ui.h` (3 Screens)
+  - `https_tls13.h`: wolfSSL-TLS-1.3-Client (Garmin ist TLS-1.3-only, mbedTLS im ESP32-Core kann das nicht)
+  - `driver.h`, `icons.h`, `fonts/`: aus Vector eInk Dashboard übernommen (GPL-3.0)
+- `emulator/`: PC-Emulator, rendert die Screens mit genau den Firmware-Headern (`stub/fake_epaper.h` ersetzt das Display)
+
+## Hardware
+
+XIAO ESP32-S3 Plus (8 MB PSRAM, 16 MB Flash), EE04-Board, 800×480 s/w (UC8179).
+Tasten: KEY1 (D1) Aktualisieren, KEY2 (D2) weiter, KEY3 (D4) zurück, 5× drücken = Setup-Portal.
+
+## Bauen
+
+Arduino IDE, Board `XIAO_ESP32S3_PLUS`, PSRAM „OPI PSRAM“, Partition „16M Flash (3MB APP/9.9MB FATFS)“ (Pflicht, Firmware ~2,05 MB).
+Bibliothek `wolfssl` (5.8.4) mit Zusatzzeilen in `user_settings.h`, siehe Kopfkommentar in `https_tls13.h`.
+Upload: B gedrückt halten beim Einstecken, hochladen, R drücken.
+
+Kompilieren ohne IDE: arduino-cli mit FQBN `esp32:esp32:XIAO_ESP32S3_Plus:PSRAM=opi,PartitionScheme=app3M_fat9M_16MB,FlashSize=16M`.
+
+## Emulator
+
+```
+cd emulator && ./run.sh --fetch          # Daten holen, bauen, rendern
+./run.sh --time 07:15 --scenario warn    # Szenarien: normal|warn|nogarmin|noweather|nosleep
+```
+Ergebnis nur `emulator/out/all_screens.png`. Meldet Textüberläufe und fehlende Glyphen; nach jeder UI-Änderung laufen lassen.
+
+## Datenquellen
+
+- Garmin Connect Personal API: `POST .../personal-api-key/token` mit `Authorization: ApiKey <key>` → JWT (24 h), dann `Bearer`. Nur lesend, kein HRV/VO2max/Training Load. `Accept: */*` nötig (sonst 406).
+- Open-Meteo (frei, ohne Key), Ort Würzburg.
+- Keine Strava-API (kostenpflichtig). Garmin-Daten vor 20.07.2026 stammen von einer anderen Person und dürfen nicht verwendet werden.
+
+## Regeln
+
+- Schriften (NotoSans 18/24/32/56) haben keine Pfeile, ✓, „·“, „Ø“: solche Zeichen zeichnen statt schreiben.
+- `secrets.h` nie committen oder in Ausgaben zeigen.
+- Texte kurz halten, `text()` in `ui.h` kürzt mit „…“, das soll im Normalfall nicht greifen.
