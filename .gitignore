@@ -3,3 +3,5 @@ emulator/data/
 emulator/out/
 emulator/emulator
 FitDashboard.zip
+__pycache__/
+release/

@@ -34,3 +34,11 @@
 #define LOAD_DAYS        56   // days of activities used for fitness/fatigue
 #define CHART_LOAD_DAYS  42   // days shown in the form chart
 #define WEEKS_SHOWN      8    // weeks in the weekly-km chart
+
+// --- Firmware version and over-the-air updates (ota.h, tools/ota_release.py) ---
+#define FW_VERSION        "1.0.0"   // shown on the start screen and in the setup portal
+#define FW_BUILD          1         // +1 for every release; devices only install a higher build
+// Checked on every data fetch (hourly and KEY1). Empty string = updates off.
+#define OTA_MANIFEST_URL  "https://github.com/vA-Rene/analyse/releases/latest/download/version.json"
+#define OTA_MIN_BATTERY   30        // % battery needed to start an update
+#define OTA_MAX_TRIES     3         // give up on a build after this many failed installs

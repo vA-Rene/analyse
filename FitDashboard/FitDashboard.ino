@@ -8,6 +8,8 @@
  *   Screen 1  Overview: health left, running + weather right (default)
  *   Screen 2  Health details      Screen 3  Training details
  *
+ * Firmware updates: over the air on every data fetch, see ota.h.
+ *
  * Buttons: KEY1 = refresh data, KEY2 = next screen, KEY3 = previous screen,
  *          5x quick press on any key = setup portal (Wi-Fi, Garmin key, location).
  * Detail screens return to screen 1 after SCREEN_RETURN_MS (config.h).
@@ -34,7 +36,8 @@
 #include "time.h"
 #include "TFT_eSPI.h"
 #include "config.h"
-#if __has_include("secrets.h")
+// OTA release builds (-DFITDASH_RELEASE, tools/ota_release.py) never contain secrets.h
+#if __has_include("secrets.h") && !defined(FITDASH_RELEASE)
 #include "secrets.h"
 #else
 #include "secrets.example.h"
@@ -49,10 +52,14 @@ EPaper epaper;
 #include "metrics.h"
 #include "ui.h"
 #include "https_tls13.h"
+#include "ota.h"
 
 // =========================================================================
 // Settings (setup portal values in Preferences override config/secrets)
 // =========================================================================
+#define STR_(x) #x
+#define STR(x) STR_(x)
+
 struct Settings {
   String ssid, password, garminKey, place;
   float lat, lon;
@@ -89,11 +96,20 @@ String garminToken;
 long garminTokenTime = 0;
 
 void startConfigPortal();
+void showMessage(const char* line1, const char* line2);
 
 // =========================================================================
 // Settings
 // =========================================================================
 void loadSettings() {
+  // Store compiled-in secrets once, so later OTA releases (built without secrets.h) keep them.
+  prefs.begin("fit_cfg", false);
+  if (!prefs.isKey("ssid") && strlen(SECRET_WIFI_SSID)) {
+    prefs.putString("ssid", SECRET_WIFI_SSID);
+    prefs.putString("pass", SECRET_WIFI_PASSWORD);
+  }
+  if (!prefs.isKey("garminKey") && strlen(SECRET_GARMIN_API_KEY)) prefs.putString("garminKey", SECRET_GARMIN_API_KEY);
+  prefs.end();
   prefs.begin("fit_cfg", true);
   cfg.ssid = prefs.getString("ssid", SECRET_WIFI_SSID);
   cfg.password = prefs.getString("pass", SECRET_WIFI_PASSWORD);
@@ -324,6 +340,9 @@ void fetchAllData() {
   }
   fetchWeather();
   fetchGarmin();
+  // the first fetch that reaches a server confirms a freshly installed firmware
+  if (!D.weatherStatus[0] || !D.garminStatus[0]) otaConfirm();
+  otaCheck(batteryPercent(), showMessage);
   turnOffWiFi();
   computeNow();
 }
@@ -362,7 +381,7 @@ void updateClockPartial(const struct tm& now) {
 #endif
 }
 
-void showMessage(const char* line1, const char* line2 = nullptr) {
+void showMessage(const char* line1, const char* line2) {
 #ifdef EPAPER_ENABLE
   epaper.fillScreen(TFT_WHITE);
   text(line1, 400, 220, 32, MC_DATUM);
@@ -390,7 +409,7 @@ String portalPage() {
          "<title>Fit Dashboard Setup</title><style>body{font-family:sans-serif;max-width:480px;margin:20px auto;padding:0 16px}"
          "label{display:block;margin-top:14px;font-weight:600}input{width:100%;padding:8px;font-size:16px;box-sizing:border-box}"
          "button{margin-top:20px;padding:12px;width:100%;font-size:17px}small{color:#555}</style>"
-         "<h1>Fit Dashboard</h1><form method=post action=/save>");
+         "<h1>Fit Dashboard</h1><p><small>Firmware " FW_VERSION " (Build " STR(FW_BUILD) ")</small></p><form method=post action=/save>");
   auto field = [&](const char* name, const char* label, const String& value, const char* type, const char* hint) {
     p += "<label for="; p += name; p += ">"; p += label; p += "</label><input id="; p += name; p += " name="; p += name;
     p += " type="; p += type; p += " value=\""; p += htmlEscape(value); p += "\">";
@@ -543,8 +562,11 @@ void setup() {
 #ifdef EPAPER_ENABLE
   epaper.begin();
   if (cfg.ssid.length() == 0) startConfigPortal();
-  showMessage("Fit Dashboard", "Verbinde mit dem WLAN …");
-  if (!connectWiFi()) startConfigPortal();
+  showMessage("Fit Dashboard " FW_VERSION, "Verbinde mit dem WLAN …");
+  if (!connectWiFi()) {
+    otaRollbackIfPending();  // a fresh update that cannot connect goes back to the old firmware
+    startConfigPortal();
+  }
   showMessage("Fit Dashboard", "Lade Garmin- und Wetterdaten …");
   fetchAllData();
   currentScreen = SCREEN_OVERVIEW;
@@ -563,7 +585,7 @@ void loop() {
   if (!getLocalTime(&now, 100)) { delay(500); return; }
 
   if (needsDataRefresh) {
-    showMessage("Aktualisiere …");
+    showMessage("Aktualisiere …", nullptr);
     fetchAllData();
     needsDataRefresh = false;
     needsScreenUpdate = true;

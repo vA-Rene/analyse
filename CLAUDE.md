@@ -10,8 +10,10 @@ Alles läuft auf dem ESP32, kein eigener Server. Nur freie APIs. Kommunikation m
   - `config.h`: Ort, Ziele, Puls-Werte, Intervalle; `secrets.h` (gitignored, Vorlage `secrets.example.h`)
   - `model.h` (Datenstrukturen), `parse.h` (JSON-Filter + Parser), `metrics.h` (TRIMP/Fitness/Ermüdung, Infekt-Check, Lauffenster, Empfehlung, Prognosen), `ui.h` (3 Screens)
   - `https_tls13.h`: wolfSSL-TLS-1.3-Client (Garmin ist TLS-1.3-only, mbedTLS im ESP32-Core kann das nicht)
+  - `ota.h`: OTA-Update bei jedem Datenabruf (`version.json` unter `OTA_MANIFEST_URL`), ECDSA-signiert gegen `ota_pubkey.h`, Rollback bis zum ersten erfolgreichen Abruf
   - `driver.h`, `icons.h`, `fonts/`: aus Vector eInk Dashboard übernommen (GPL-3.0)
 - `emulator/`: PC-Emulator, rendert die Screens mit genau den Firmware-Headern (`stub/fake_epaper.h` ersetzt das Display)
+- `tools/ota_release.py`: `keygen` (einmalig, privater Schlüssel in `~/.config/fitdashboard/`, nie ins Repo), `build` (arduino-cli mit `-DFITDASH_RELEASE`, ohne `secrets.h`), `release <bin>`
 
 ## Hardware
 
@@ -25,6 +27,10 @@ Bibliothek `wolfssl` (5.8.4) mit Zusatzzeilen in `user_settings.h`, siehe Kopfko
 Upload: B gedrückt halten beim Einstecken, hochladen, R drücken.
 
 Kompilieren ohne IDE: arduino-cli mit FQBN `esp32:esp32:XIAO_ESP32S3_Plus:PSRAM=opi,PartitionScheme=app3M_fat9M_16MB,FlashSize=16M`.
+
+## Release (OTA)
+
+`FW_BUILD` und `FW_VERSION` in `config.h` erhöhen, `python3 tools/ota_release.py build`, dann `release/FitDashboard.bin` und `release/version.json` als GitHub-Release mit Tag `v<FW_VERSION>` hochladen. Release-Binaries dürfen nie `secrets.h` enthalten (das Werkzeug bricht dann ab); Zugangsdaten liegen auf dem Gerät im NVS.
 
 ## Emulator
 
