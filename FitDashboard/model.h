@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <vector>
 #include "config.h"
 
 // ----------------------------------------------------------------- dates
@@ -76,10 +77,12 @@ struct HealthToday {
   static const int CURVE_MAX = 96;
   uint8_t bbCurve[CURVE_MAX];      // today's body battery, oldest first
   int bbCurveN = 0;
+  int stressMin[4] = {0, 0, 0, 0};  // minutes at rest, low, medium, high stress
 };
 
 // ----------------------------------------------------------------- activities
 struct Activity {
+  long long id = 0;
   long day = -1;
   int startMin = 0;           // minutes after midnight, local time
   bool run = false;
@@ -88,6 +91,10 @@ struct Activity {
   float minutes = 0;          // moving time
   int avgHr = 0, maxHr = 0;
   float te = 0;               // aerobic training effect
+  float anTe = 0;             // anaerobic training effect
+  float zoneMin[5] = {0, 0, 0, 0, 0};  // minutes in heart-rate zones 1-5
+  bool strength = false;
+  char type[12] = "";         // kind of run from Garmin's training-effect label
   float best5k = 0, best10k = 0, bestHalf = 0;  // fastest splits inside the run, seconds
   float load = 0;             // TRIMP (metrics.h)
 };
@@ -98,7 +105,7 @@ struct Weather {
   float tempNow = 0, feelsNow = 0, windNow = 0;
   int codeNow = 0;
   float rain2h = 0;             // mm in the next 2 hours (15-minute data)
-  static const int HOURS = 36;
+  static const int HOURS = 48;   // from today 00:00
   int hourN = 0;
   long hourDay[HOURS];          // day number of each hourly entry
   int hourOfDay[HOURS];
@@ -111,6 +118,49 @@ struct Weather {
   long dDay[DAYS];
   float tMin[DAYS], tMax[DAYS];
   int pMax[DAYS], dCode[DAYS];
+};
+
+// ----------------------------------------------------------------- coach
+// Longer history and the values derived from it: what to do today and why.
+struct CoachNight {
+  long day = -1;
+  float sleepH = -1;
+  int bedMin = -1, wakeMin = -1;   // minutes after 12:00 of the previous day
+  int deepMin = 0, awakeMin = 0;
+  // the watch was taken off or put on during the night
+  bool incomplete() const { return sleepH > 0 && ((deepMin == 0 && awakeMin == 0) || sleepH < 3); }
+};
+struct CoachDay { long day = -1; int rhr = -1, bbMin = -1, bbMax = -1, charged = -1, drained = -1, steps = -1, intensity = 0; };
+struct CoachRun {
+  long day = -1;
+  float km = 0, minutes = 0, te = 0, anTe = 0, zoneMin[5] = {0, 0, 0, 0, 0};
+  int avgHr = 0, maxHr = 0;
+  char type[12] = "";
+};
+struct CoachHour { long day; int hour; float temp, feels, precip, wind; int prob, code; };
+struct RunWindow { long day = -1; int hour = -1; float temp = 0, feels = 0, wind = 0, score = 1e9; int prob = 0; bool dark = false; };
+
+struct Coach {
+  std::vector<CoachNight> nights;    // oldest first, COACH_DAYS
+  std::vector<CoachDay> days;        // oldest first, COACH_DAYS
+  std::vector<CoachRun> runs;        // oldest first (from the activity list)
+  std::vector<long> strengthDays;    // days with a recorded strength session
+  int zoneFloor[5] = {100, 120, 140, 160, 180};
+  std::vector<std::pair<int, int>> dayHr;   // minute of day, bpm
+  std::vector<CoachHour> hours;      // 7 days from today 00:00
+  int sunrise[7] = {-1, -1, -1, -1, -1, -1, -1}, sunset[7] = {-1, -1, -1, -1, -1, -1, -1};
+  long wxFirstDay = -1;
+  std::vector<float> runKm, runPace, runHr, runAlt;   // newest run along its distance, NAN = gap
+  long runDay = -1;
+  long long runId = 0;               // activity the run track belongs to
+  // derived (metrics.h)
+  float chargePerHour = 9.5f, drainPerHour = 4.0f;   // body battery points per hour asleep / awake
+  int usualBed = -1, usualWake = -1;                 // minutes after noon
+  RunWindow win[7];
+  int bestDay[2] = {-1, -1};
+  char coachHead[48] = "", coachBody[200] = "";
+  char tipHead[40] = "", tipBody[120] = "";
+  int bbBedProjected = -1;
 };
 
 // ----------------------------------------------------------------- derived values
@@ -162,6 +212,7 @@ struct DashboardData {
   Activity acts[MAX_ACT];             // oldest first
   int actN = 0;
   Weather wx;
+  Coach c;
   Metrics m;
   long todayNum = 0;
   int nowMin = 0;                     // minutes after midnight when metrics were computed

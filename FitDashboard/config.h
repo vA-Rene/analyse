@@ -30,14 +30,18 @@
 #define GARMIN_TOKEN_MAX_AGE_S   (20L * 3600L)           // Garmin access tokens live 24 h; renew after 20 h
 
 // --- Analysis windows ---
-#define HEALTH_DAYS      14   // days shown on the health detail screen
+#define HEALTH_DAYS      14   // days shown on the body screen
+#define COACH_DAYS       30   // days of daily values and nights loaded (the sleep list allows about 30)
+#define ACTIVITY_DAYS    180  // days of activities loaded
 #define LOAD_DAYS        56   // days of activities used for fitness/fatigue
+// Garmin data before this day is ignored (e.g. a watch that had another owner). "" = no limit.
+#define GARMIN_FIRST_DAY "2026-07-20"
 #define CHART_LOAD_DAYS  42   // days shown in the form chart
 #define WEEKS_SHOWN      8    // weeks in the weekly-km chart
 
 // --- Firmware version and over-the-air updates (ota.h, tools/ota_release.py) ---
-#define FW_VERSION        "1.0.0"   // shown on the start screen and in the setup portal
-#define FW_BUILD          1         // +1 for every release; devices only install a higher build
+#define FW_VERSION        "1.0.1"   // shown on the start screen and in the setup portal
+#define FW_BUILD          2         // +1 for every release; devices only install a higher build
 // Checked on every data fetch (hourly and KEY1). Empty string = updates off.
 #define OTA_MANIFEST_URL  "https://github.com/vA-Rene/analyse/releases/latest/download/version.json"
 #define OTA_MIN_BATTERY   30        // % battery needed to start an update

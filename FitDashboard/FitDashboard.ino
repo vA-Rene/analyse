@@ -5,8 +5,8 @@
  *
  * Health data (Garmin Connect Personal API) and running data with weather
  * (Open-Meteo) on three screens:
- *   Screen 1  Overview: health left, running + weather right (default)
- *   Screen 2  Health details      Screen 3  Training details
+ *   Screen 1  Today: coach, the day on one time axis, body, week, tonight (default)
+ *   Screen 2  Body details        Screen 3  Running details
  *
  * Firmware updates: over the air on every data fetch, see ota.h.
  *
@@ -52,6 +52,7 @@ EPaper epaper;
 #include "metrics.h"
 #include "ui.h"
 #include "https_tls13.h"
+#include "unzip.h"
 #include "ota.h"
 
 // =========================================================================
@@ -258,6 +259,43 @@ int garminGet(const String& path, JsonDocument& doc, void (*makeFilter)(JsonDocu
   return 401;
 }
 
+// GET a Garmin endpoint without parsing (binary downloads); renews the token once on 401.
+// The caller frees the answer with httpsFree().
+HttpsResponse garminGetRaw(const String& path) {
+  HttpsResponse r;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    bool tokenOld = (long)time(nullptr) - garminTokenTime > GARMIN_TOKEN_MAX_AGE_S;
+    if (garminToken.length() == 0 || tokenOld || attempt == 1) {
+      if (!garminRefreshToken()) { r.status = -401; return r; }
+    }
+    r = httpsRequest(GARMIN_HOST, "GET", path, "Bearer " + garminToken);
+    if (r.status != 401) return r;
+    httpsFree(r);
+    garminToken = "";
+  }
+  return r;
+}
+
+// Pace, heart rate and altitude of the newest run from its FIT file. Loaded once per run.
+void fetchRunTrack() {
+  const Activity* run = nullptr;
+  for (int i = D.actN - 1; i >= 0 && !run; i--) if (D.acts[i].run) run = &D.acts[i];
+  if (!run || run->id == 0 || run->id == D.c.runId) return;
+  char path[80];
+  snprintf(path, sizeof(path), "/download-service/files/activity/%lld", run->id);
+  HttpsResponse r = garminGetRaw(path);
+  if (r.status == 200) {
+    size_t n = 0;
+    uint8_t* fit = unzipFirst((const uint8_t*)r.body, r.bodyLen, &n);
+    if (fit && parseFitRun(fit, n, D.c)) {
+      D.c.runDay = run->day;
+      D.c.runId = run->id;
+    } else Serial.printf("[Garmin] run file not readable (%u B)\n", (unsigned)r.bodyLen);
+    if (fit) unzipFree(fit);
+  } else Serial.printf("[Garmin] run file HTTP %d\n", r.status);
+  httpsFree(r);
+}
+
 String isoDate(long dayNum) {
   char buf[11];
   isoFromDayNumber(dayNum, buf);
@@ -270,7 +308,9 @@ void fetchGarmin() {
     snprintf(D.garminStatus, sizeof(D.garminStatus), "Kein API-Key (Setup-Portal)");
     return;
   }
-  String today = isoDate(D.todayNum), first = isoDate(D.todayNum - (HEALTH_DAYS - 1));
+  long oldest = garminFirstDay();
+  long firstDay = D.todayNum - (COACH_DAYS - 1), actDay = D.todayNum - (ACTIVITY_DAYS - 1);
+  String today = isoDate(D.todayNum), first = isoDate(firstDay > oldest ? firstDay : oldest);
   JsonDocument doc;
   int s;
 
@@ -294,9 +334,18 @@ void fetchGarmin() {
   s = garminGet("/sleep-service/sleep/dailySleepSummariesByDate?startDate=" + first + "&endDate=" + today, doc, filterSleepRange);
   if (s == 200) parseSleepRange(doc, D);
 
-  s = garminGet("/activitylist-service/activities/search/activities?startDate=" + isoDate(D.todayNum - (LOAD_DAYS - 1)) +
+  s = garminGet("/activitylist-service/activities/search/activities?startDate=" + isoDate(actDay > oldest ? actDay : oldest) +
                 "&limit=100", doc, filterActivities);
   if (s == 200) parseActivities(doc, D);
+
+  static long zonesDay = -1;   // the zone limits rarely change: once a day
+  if (zonesDay != D.todayNum) {
+    s = garminGet("/biometric-service/heartRateZones/v2", doc, nullptr);
+    if (s == 200) { parseHrZones(doc, D.c); zonesDay = D.todayNum; }
+  }
+  s = garminGet("/wellness-service/wellness/dailyHeartRate?date=" + today, doc, filterDayHr);
+  if (s == 200) parseDayHr(doc, D.c);
+  fetchRunTrack();
   Serial.printf("[Garmin] ok: bb %d, sleep %.1f h, %d activities\n", D.today.bbNow, D.today.sleepH, D.actN);
 }
 
@@ -309,7 +358,7 @@ void fetchWeather() {
   JsonDocument doc;
   int s = httpsGetJson("api.open-meteo.com", path, "", doc, nullptr);
   Weather w;
-  if (s == 200 && parseWeather(doc, w)) D.wx = w;
+  if (s == 200 && parseWeather(doc, w)) { D.wx = w; parseCoachWeather(doc, D.c); }
   else snprintf(D.weatherStatus, sizeof(D.weatherStatus), "Open-Meteo HTTP %d", s);
 }
 

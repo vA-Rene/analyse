@@ -8,7 +8,8 @@ Alles läuft auf dem ESP32, kein eigener Server. Nur freie APIs. Kommunikation m
 - `FitDashboard/`: Arduino-Firmware (der eigentliche Code)
   - `FitDashboard.ino`: Setup/Loop, WLAN, Zeit, Akku, Tasten, Setup-Portal, Datenabruf, Light Sleep
   - `config.h`: Ort, Ziele, Puls-Werte, Intervalle; `secrets.h` (gitignored, Vorlage `secrets.example.h`)
-  - `model.h` (Datenstrukturen), `parse.h` (JSON-Filter + Parser), `metrics.h` (TRIMP/Fitness/Ermüdung, Infekt-Check, Lauffenster, Empfehlung, Prognosen), `ui.h` (3 Screens)
+  - `model.h` (Datenstrukturen, `Coach` = längere Historie + abgeleitete Aussagen), `parse.h` (JSON-Filter + Parser, FIT-Leser für den letzten Lauf), `metrics.h` (TRIMP/Fitness/Ermüdung, Infekt-Check, Empfehlung, `computeCoach`: Coach-Satz, Abend-Hebel, Lauffenster für 7 Tage), `ui.h` (3 Screens: Heute, Körper, Laufen)
+  - `unzip.h`: entpackt das ZIP mit der FIT-Datei (Inflate aus dem ESP32-ROM)
   - `https_tls13.h`: wolfSSL-TLS-1.3-Client (Garmin ist TLS-1.3-only, mbedTLS im ESP32-Core kann das nicht)
   - `ota.h`: OTA-Update bei jedem Datenabruf (`version.json` unter `OTA_MANIFEST_URL`), ECDSA-signiert gegen `ota_pubkey.h`, Rollback bis zum ersten erfolgreichen Abruf
   - `driver.h`, `icons.h`, `fonts/`: aus Vector eInk Dashboard übernommen (GPL-3.0)
@@ -38,13 +39,15 @@ Kompilieren ohne IDE: arduino-cli mit FQBN `esp32:esp32:XIAO_ESP32S3_Plus:PSRAM=
 cd emulator && ./run.sh --fetch          # Daten holen, bauen, rendern
 ./run.sh --time 07:15 --scenario warn    # Szenarien: normal|warn|nogarmin|noweather|nosleep
 ```
-Ergebnis nur `emulator/out/all_screens.png`. Meldet Textüberläufe und fehlende Glyphen; nach jeder UI-Änderung laufen lassen.
+Design-Prototypen, nur im Emulator, nicht in der Firmware (bauen auf dem Firmware-Code auf): `--v3a|--v3b|--v3c` (`proto_v3.h`: Befund-Maschine mit Karten, Briefing, Tagesverlauf; `out/v3*.png`) sowie `--v4` (`proto_v4.h`: Longevity-Säulen, `out/v4_longevity.png`) und `--v5` (`proto_v5.h`: ein Screen mit wechselndem Befund, Bedienung per Sprache als Mock-up, `out/v5_ein_screen.png`). Aktuell bevorzugte Richtung: `--v6` (`proto_v6.h`, `out/v6_elemente.png`): ein Screen mit festem Rahmen, in der Mitte wechselnde Elemente (Titel, Bild oder Kennzahl, ein erklärender Satz), per Sprache abrufbar.
+Ergebnis der Firmware-Screens: `emulator/out/all_screens.png`. Meldet Textüberläufe und fehlende Glyphen; nach jeder UI-Änderung laufen lassen.
 
 ## Datenquellen
 
+- Abrufe je Zyklus: Tageswerte, letzte Nacht, Body Battery, Tages- und Schlafliste (`COACH_DAYS` = 30, die Schlafliste lehnt längere Zeiträume mit HTTP 400 ab), Aktivitäten (`ACTIVITY_DAYS`), Tagespuls; Pulszonen einmal am Tag, FIT-Datei nur bei neuem Lauf.
 - Garmin Connect Personal API: `POST .../personal-api-key/token` mit `Authorization: ApiKey <key>` → JWT (24 h), dann `Bearer`. Nur lesend, kein HRV/VO2max/Training Load. `Accept: */*` nötig (sonst 406).
 - Open-Meteo (frei, ohne Key), Ort Würzburg.
-- Keine Strava-API (kostenpflichtig). Garmin-Daten vor 20.07.2026 stammen von einer anderen Person und dürfen nicht verwendet werden.
+- Keine Strava-API (kostenpflichtig). Garmin-Daten vor 20.07.2026 stammen von einer anderen Person und dürfen nicht verwendet werden (`GARMIN_FIRST_DAY` in `config.h`, gilt für Firmware und `fetch_data.py`).
 
 ## Regeln
 

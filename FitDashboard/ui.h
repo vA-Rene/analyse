@@ -1,14 +1,18 @@
 /*
  * File: ui.h
  * Purpose: Draws the three screens on the 800x480 black/white panel.
- *   Screen 1  Overview: health left, running + weather right
- *   Screen 2  Health details (14 days)
- *   Screen 3  Training details (form, weeks, runs, predictions, 3-day weather)
+ *   Screen 1  Today: what the coach suggests and why, the day on one time axis
+ *             (energy, temperature, rain, daylight, best hour to run), body, week, tonight
+ *   Screen 2  Body: sleep rhythm, overnight charge, resting heart rate, heart rate today
+ *   Screen 3  Running: last run along its distance, heart-rate zones, weeks, runs, 7-day running weather
  * Uses only plain drawing calls of the Seeed_GFX EPaper class, so the PC test
  * renderer can draw the same code with a stand-in class.
  */
 #pragma once
 #include <math.h>
+#include <algorithm>
+#include <string>
+#include <vector>
 #include "model.h"
 #include "icons.h"
 #include "fonts/NotoSansMedium18.h"
@@ -22,7 +26,6 @@ enum ScreenId { SCREEN_OVERVIEW = 0, SCREEN_HEALTH = 1, SCREEN_TRAINING = 2, SCR
 
 static const int SCR_W = 800, SCR_H = 480;
 static const int HEADER_H = 46;
-static const int COL_SPLIT = 330;           // screen 1: x of the vertical divider
 static const int CLOCK_X = 676, CLOCK_Y = 0, CLOCK_W = 124, CLOCK_H = 44;  // partial-refresh window
 
 // ----------------------------------------------------------------- text
@@ -196,200 +199,7 @@ inline void lineChart(int x, int y, int w, int h, const float* v, int n, float l
   }
 }
 
-// ================================================================= SCREEN 1
-inline void drawOverview(const DashboardData& D, const struct tm& now, int batteryPct) {
-  const HealthToday& t = D.today;
-  const Metrics& m = D.m;
-  char buf[64], b2[32];
-  drawHeader(D, now, SCREEN_OVERVIEW, nullptr, batteryPct);
-  vline(COL_SPLIT, HEADER_H + 8, SCR_H - HEADER_H - 16);
-
-  // ---------------- left: health
-  const int L = 16, R = COL_SPLIT - 16;
-  sectionLabel("ERHOLUNG", L, 66);
-  text(m.recoveryWord, R, 66, 18, MR_DATUM);
-  if (D.garminStatus[0]) {
-    text("Garmin:", L, 130, 24);
-    text(D.garminStatus, L, 162, 18, ML_DATUM, false, R - L);
-  } else {
-    int bb = t.bbNow >= 0 ? t.bbNow : t.bbHigh;
-    snprintf(buf, sizeof(buf), "%s", bb >= 0 ? "" : "--");
-    if (bb >= 0) snprintf(buf, sizeof(buf), "%d", bb);
-    text(buf, L, 118, 56, ML_DATUM);
-    int bx = L + textW(buf, 56) + 14;
-    text("Body Battery", bx, 104, 24);
-    if (t.bbWake >= 0) snprintf(buf, sizeof(buf), "Aufwachen %d", t.bbWake);
-    else snprintf(buf, sizeof(buf), "Höchstwert %d", t.bbHigh);
-    text(buf, bx, 132, 18);
-  }
-  // today's body battery curve
-  const int cy0 = 154, ch = 50;
-  dottedH(L, cy0, R - L, 6);
-  dottedH(L, cy0 + ch, R - L, 6);
-  if (t.bbCurveN >= 2) {
-    float v[HealthToday::CURVE_MAX];
-    for (int i = 0; i < t.bbCurveN; i++) v[i] = t.bbCurve[i];
-    // x axis = whole day 0-24 h, the curve ends at "now"
-    int wNow = (int)((R - L) * (D.nowMin / 1440.0f));
-    if (wNow < 20) wNow = 20;
-    lineChart(L, cy0, wNow, ch, v, t.bbCurveN, 0, 100);
-    for (int i = 0; i < t.bbCurveN; i++) {
-      int cx = L + (int)((float)i * (wNow - 1) / (t.bbCurveN - 1));
-      int yy = cy0 + ch - 1 - (int)(v[i] / 100.0f * (ch - 1));
-      for (int yy2 = yy + 2; yy2 < cy0 + ch; yy2 += 3) if ((cx + yy2) % 3 == 0) epaper.drawPixel(cx, yy2, TFT_BLACK);
-    }
-  }
-  text("0", L, cy0 + ch + 12, 18, ML_DATUM);
-  text("12", L + (R - L) / 2, cy0 + ch + 12, 18, MC_DATUM);
-  text("24 Uhr", R, cy0 + ch + 12, 18, MR_DATUM);
-  hline(L, 230, R - L);
-
-  // sleep
-  sectionLabel("Schlaf", L, 248);
-  if (t.sleepH > 0) {
-    fmtHours(buf, sizeof(buf), t.sleepH);
-    text(buf, L, 278, 32);
-    float tot = t.deepH + t.lightH + t.remH + t.awakeH;
-    snprintf(buf, sizeof(buf), "Tief %d %% • REM %d %%", (int)lroundf(t.deepH / tot * 100), (int)lroundf(t.remH / tot * 100));
-    text(buf, R, 278, 18, MR_DATUM);
-    // phase bar: deep black, light hatched, REM shaded, awake white
-    int x = L, bw = R - L, y = 300, bh = 12;
-    float parts[4] = {t.deepH, t.lightH, t.remH, t.awakeH};
-    for (int k = 0; k < 4; k++) {
-      int pw = (int)lroundf(parts[k] / tot * bw);
-      if (k == 3) pw = L + bw - x;
-      if (k == 0) epaper.fillRect(x, y, pw, bh, TFT_BLACK);
-      else if (k == 1) hatch(x, y, pw, bh);
-      else if (k == 2) shade(x, y, pw, bh);
-      x += pw;
-    }
-    epaper.drawRect(L, y, bw, bh, TFT_BLACK);
-  } else {
-    text("keine Daten", L, 278, 24);
-    text("Uhr nachts tragen", R, 278, 18, MR_DATUM);
-  }
-
-  // resting HR
-  sectionLabel("Ruhepuls", L, 334);
-  if (t.rhr > 0) {
-    snprintf(buf, sizeof(buf), "%d", t.rhr);
-    text(buf, L, 362, 32);
-    if (m.rhrBaseline > 0) {
-      int d = t.rhr - m.rhrBaseline;
-      snprintf(buf, sizeof(buf), "%+d zur Basis %d", d, m.rhrBaseline);
-      text(buf, R - 16, 362, 18, MR_DATUM);
-      trendMark(R - 5, 362, (float)d, 1.5f);
-    } else text("Basis ab 3 Nächten", R, 362, 18, MR_DATUM);
-  } else text("--", L, 362, 32);
-
-  // stress + steps
-  sectionLabel("Stress", L, 396);
-  if (t.stressAvg >= 0) {
-    snprintf(buf, sizeof(buf), "%d", t.stressAvg);
-    text(buf, L, 424, 32);
-    const char* w = t.stressAvg < 26 ? "ruhig" : (t.stressAvg < 51 ? "mittel" : "hoch");
-    if (t.steps >= 0) snprintf(buf, sizeof(buf), "%s • %ld Schritte", w, t.steps);
-    else snprintf(buf, sizeof(buf), "%s", w);
-    text(buf, R, 424, 18, MR_DATUM);
-  } else text("--", L, 424, 32);
-
-  // health check line
-  int sy = 446;
-  if (m.healthStatus == 2) {
-    epaper.fillRoundRect(L, sy, R - L, 28, 6, TFT_BLACK);
-    statusMark(L + 14, sy + 14, 2);
-    text(m.healthText, L + 28, sy + 14, 18, ML_DATUM, true, R - L - 34);
-  } else {
-    statusMark(L + 8, sy + 14, m.healthStatus);
-    text(m.healthText, L + 24, sy + 14, 18, ML_DATUM, false, R - L - 24);
-  }
-
-  // ---------------- right: running + weather
-  const int X = COL_SPLIT + 16, RR = SCR_W - 16;
-  sectionLabel("LAUFEN", X, 66);
-  if (m.lastRunIdx >= 0) {
-    if (m.daysSinceRun == 0) snprintf(buf, sizeof(buf), "letzter Lauf heute");
-    else if (m.daysSinceRun == 1) snprintf(buf, sizeof(buf), "letzter Lauf gestern");
-    else snprintf(buf, sizeof(buf), "letzter Lauf vor %d Tagen", m.daysSinceRun);
-    text(buf, RR, 66, 18, MR_DATUM);
-  }
-  text(m.recTitle, X, 100, 32, ML_DATUM, false, RR - X);
-  text(m.recReason, X, 130, 18, ML_DATUM, false, RR - X);
-  if (m.windowText[0]) {
-    text(m.windowText, X, 160, 24, ML_DATUM, false, RR - X);
-    text(m.clothesText, X, 188, 18, ML_DATUM, false, RR - X);
-  }
-  hline(X, 206, RR - X);
-
-  // weather now
-  const Weather& w = D.wx;
-  if (w.ok) {
-    drawIcon64(X - 4, 214, w.codeNow);
-    snprintf(buf, sizeof(buf), "%d°", (int)lroundf(w.tempNow));
-    text(buf, X + 70, 236, 32);
-    snprintf(buf, sizeof(buf), "gefühlt %d°", (int)lroundf(w.feelsNow));
-    text(buf, X + 70, 266, 18);
-    text(m.rainText, X, 300, 18);
-    text(m.darkText, X, 324, 18);
-
-    // next 15 hours: temperature line + rain probability bars
-    const int gx = X + 196, gw = RR - gx, gy = 216, gh = 62, by = 288, bh = 34;
-    int n = w.hourN < 15 ? w.hourN : 15;
-    float tv[15], lo = 1e9, hi = -1e9;
-    for (int i = 0; i < n; i++) { tv[i] = w.temp[i]; lo = fminf(lo, tv[i]); hi = fmaxf(hi, tv[i]); }
-    if (hi - lo < 4) { float mid = (hi + lo) / 2; lo = mid - 2; hi = mid + 2; }
-    lineChart(gx, gy, gw, gh, tv, n, lo, hi);
-    snprintf(buf, sizeof(buf), "%d°", (int)lroundf(hi));
-    text(buf, gx - 6, gy + 4, 18, MR_DATUM);
-    snprintf(buf, sizeof(buf), "%d°", (int)lroundf(lo));
-    text(buf, gx - 6, gy + gh - 4, 18, MR_DATUM);
-    float slot = (float)gw / n;
-    for (int i = 0; i < n; i++) {
-      int bx = gx + (int)(i * slot) + 1, bwid = (int)slot - 2;
-      int hh = (int)(w.prob[i] / 100.0f * bh);
-      epaper.drawFastHLine(bx, by + bh, bwid, TFT_BLACK);
-      if (hh > 0) { if (w.prob[i] >= 50) epaper.fillRect(bx, by + bh - hh, bwid, hh, TFT_BLACK); else shade(bx, by + bh - hh, bwid, hh); }
-      if (i % 3 == 0) { snprintf(buf, sizeof(buf), "%02d", w.hourOfDay[i]); text(buf, bx, by + bh + 12, 18, ML_DATUM); }
-    }
-  } else {
-    text("Wetter nicht verfügbar", X, 250, 24);
-    if (D.weatherStatus[0]) text(D.weatherStatus, X, 280, 18, ML_DATUM, false, RR - X);
-  }
-  hline(X, 352, RR - X);
-
-  // week
-  sectionLabel("WOCHE", X, 370);
-  snprintf(buf, sizeof(buf), "Fitness %d", (int)lroundf(m.ctl));
-  text(buf, RR - 16, 370, 18, MR_DATUM);
-  trendMark(RR - 5, 370, m.ctl - m.ctlWeekAgo, 0.5f);
-  float km = m.weekKm[WEEKS_SHOWN - 1];
-  fmtDec(b2, sizeof(b2), km, 1);
-  snprintf(buf, sizeof(buf), "%s / %d km", b2, D.weeklyGoalKm);
-  text(buf, X, 402, 24);
-  // day dots
-  const int dx0 = RR - 7 * 34 + 17;
-  for (int d = 0; d < 7; d++) {
-    int cx = dx0 + d * 34;
-    text(WD_SHORT[d], cx, 388, 18, MC_DATUM);
-    bool ran = m.runDaysThisWeek & (1 << d);
-    if (ran) epaper.fillCircle(cx, 412, 7, TFT_BLACK);
-    else epaper.drawCircle(cx, 412, 7, TFT_BLACK);
-    if (d == m.todayWeekday) epaper.drawCircle(cx, 412, 10, TFT_BLACK);
-  }
-  progressBar(X, 426, RR - X, 14, km / (D.weeklyGoalKm > 0 ? D.weeklyGoalKm : 1));
-  if (m.lastRunIdx >= 0) {
-    const Activity& a = D.acts[m.lastRunIdx];
-    char d[16], p[12], k[12];
-    fmtDayShort(d, sizeof(d), a.day);
-    fmtPace(p, sizeof(p), a.minutes * 60 / (a.km > 0 ? a.km : 1));
-    fmtDec(k, sizeof(k), a.km, 1);
-    if (a.avgHr > 0) snprintf(buf, sizeof(buf), "Zuletzt %s  %s km • %s /km • Puls %d", d, k, p, a.avgHr);
-    else snprintf(buf, sizeof(buf), "Zuletzt %s  %s km • %s /km", d, k, p);
-    text(buf, X, 460, 18, ML_DATUM, false, RR - X);
-  } else text("Noch kein Lauf mit der Uhr", X, 460, 18);
-}
-
-// ================================================================= SCREEN 2
+// ----------------------------------------------------------------- panel helpers
 inline void panelTitle(const char* s, int x, int y, const char* right = nullptr, int rx = 0) {
   text(s, x, y, 18, ML_DATUM);
   if (right) text(right, rx, y, 18, MR_DATUM);
@@ -404,269 +214,559 @@ inline void dayAxis(int x, int w, int y, int n, long firstDay) {
   }
 }
 
-inline void drawHealth(const DashboardData& D, const struct tm& now, int batteryPct) {
+// word wrap; returns the y after the last line
+inline int wrapText(const char* s, int x, int y, int size, int maxW, int lineH, int maxLines) {
+  std::string line, word;
+  int lines = 0;
+  auto flush = [&]() { text(line.c_str(), x, y + lines * lineH, size, ML_DATUM, false, maxW); lines++; line.clear(); };
+  for (const char* p = s;; p++) {
+    if (*p == ' ' || *p == 0) {
+      std::string trial = line.empty() ? word : line + " " + word;
+      if (textW(trial.c_str(), size) > maxW && !line.empty()) {
+        if (lines == maxLines - 1) { line = trial; flush(); return y + lines * lineH; }
+        flush();
+        line = word;
+      } else line = trial;
+      word.clear();
+      if (*p == 0) break;
+    } else word += *p;
+  }
+  if (!line.empty()) flush();
+  return y + lines * lineH;
+}
+inline void invLabel(const char* s, int cx, int y, int size = 18) {
+  int w = textW(s, size) + 12;
+  epaper.fillRect(cx - w / 2, y - 12, w, 24, TFT_BLACK);
+  text(s, cx, y, size, MC_DATUM, true);
+}
+inline const char* rainWord(int prob) { return prob < 20 ? "trocken" : (prob < 50 ? "evtl. Regen" : "Regen"); }
+
+// ================================================================= Coach SCREEN 1: today
+inline void drawToday(const DashboardData& D, const struct tm& now, int batteryPct) {
+  const Coach& X = D.c;
+  const HealthToday& t = D.today;
+  const Metrics& m = D.m;
+  char buf[96], b2[32];
+  drawHeader(D, now, 0, nullptr, batteryPct);
+  const int L = 16, R = SCR_W - 16;
+
+  // ---- coach
+  const int EX = 606;
+  sectionLabel("COACH", L, 64);
+  text(X.coachHead, L, 96, 32, ML_DATUM, false, EX - 30 - L);
+  wrapText(X.coachBody, L, 130, 24, EX - 30 - L, 27, 2);
+  vline(EX - 16, 56, 132);
+  sectionLabel("ENERGIE", EX, 64);
+  int bb = t.bbNow >= 0 ? t.bbNow : t.bbHigh;
+  if (bb >= 0) text(m.recoveryWord, R, 64, 18, MR_DATUM);
+  if (bb >= 0) snprintf(buf, sizeof(buf), "%d", bb); else strcpy(buf, "--");
+  text(buf, EX, 112, 56, ML_DATUM);
+  int bx = EX + textW(buf, 56) + 10;
+  if (t.bbWake >= 0) { text("Aufwachen", bx, 100, 18); snprintf(buf, sizeof(buf), "%d", t.bbWake); text(buf, bx, 124, 24); }
+  const CoachDay* td = coachDay(X, D.todayNum);
+  if (td && td->charged > 0 && t.sleepH > 0) {
+    fmtHours(b2, sizeof(b2), t.sleepH);
+    snprintf(buf, sizeof(buf), "Nacht +%d in %s", td->charged, b2);
+    text(buf, EX, 160, 18, ML_DATUM, false, R - EX);
+  }
+  hline(L, 192, R - L);
+
+  // ---- the day on one time axis: energy, temperature, rain, daylight
+  const int AX = 62, AW = R - AX;                 // 0-24 h
+  auto hx = [&](float hour) { return AX + (int)(hour * AW / 24.0f); };
+  sectionLabel("DEIN TAG", L, 210);
+  int k0 = (int)(D.todayNum - X.wxFirstDay);
+  const RunWindow* w = (k0 >= 0 && k0 < 7 && X.win[k0].hour >= 0 && D.nowMin < 19 * 60) ? &X.win[k0] : nullptr;
+  if (w) {
+    char cl[64];
+    clothingFor(w->feels, w->prob, w->wind, w->dark, cl, sizeof(cl));
+    snprintf(buf, sizeof(buf), "Lauf am besten %02d–%02d Uhr • %s • %s", w->hour, w->hour + 1, rainWord(w->prob), cl);
+  } else if (k0 + 1 < 7 && X.win[k0 + 1].hour >= 0) {
+    const RunWindow& n = X.win[k0 + 1];
+    snprintf(buf, sizeof(buf), "Morgen am besten %02d–%02d Uhr • %s • %d°", n.hour, n.hour + 1, rainWord(n.prob), (int)lroundf(n.temp));
+  } else buf[0] = 0;
+  if (D.weatherStatus[0]) snprintf(buf, sizeof(buf), "Wetter: %s", D.weatherStatus);
+  text(buf, R, 210, 18, MR_DATUM, false, 620);
+
+  const int cy = 226, ch = 64;                    // energy chart
+  dottedH(AX, cy, AW, 6); dottedH(AX, cy + ch / 2, AW, 6); hline(AX, cy + ch, AW);
+  text("100", AX - 8, cy + 2, 18, MR_DATUM);
+  text("50", AX - 8, cy + ch / 2, 18, MR_DATUM);
+  int nowX = hx(D.nowMin / 60.0f);
+  if (t.bbCurveN >= 2) {
+    int px = -1, py = -1;
+    for (int i = 0; i < t.bbCurveN; i++) {
+      int x = AX + (int)((float)i * (nowX - AX) / (t.bbCurveN - 1));
+      int y = cy + ch - (int)(t.bbCurve[i] / 100.0f * ch);
+      if (px >= 0) { thickLine(px, py, x, y); epaper.drawLine(px, py + 2, x, y + 2, TFT_BLACK); }
+      for (int yy = y + 4; yy < cy + ch; yy += 3) if ((x + yy) % 3 == 0) epaper.drawPixel(x, yy, TFT_BLACK);
+      px = x; py = y;
+    }
+    // projection until the usual bedtime
+    if (X.usualBed >= 0 && X.bbBedProjected >= 0) {
+      float bedHour = fminf(24, X.usualBed / 60.0f + 12);
+      int ex = hx(bedHour);
+      float atEnd = fmaxf(5, t.bbNow - X.drainPerHour * (bedHour - D.nowMin / 60.0f));
+      if (ex > px + 12) {
+        int ey = cy + ch - (int)(atEnd / 100.0f * ch);
+        dashedLine(px, py, ex, ey);
+        snprintf(buf, sizeof(buf), "~%d", (int)lroundf(atEnd / 5) * 5);
+        text(buf, ex - 6, ey - 14 < cy + 10 ? cy + 10 : ey - 14, 18, MR_DATUM);
+      }
+    }
+  }
+  // temperature row, rain lane, daylight strip
+  const int ty = 304, ry = 316, rh = 20, sy = ry + rh + 3;
+  text("°C", AX - 8, ty, 18, MR_DATUM);
+  text("Regen", AX - 8, ry + rh / 2 + 1, 18, MR_DATUM);
+  for (auto& h : X.hours) {
+    if (h.day != D.todayNum) continue;
+    int x0 = hx(h.hour), x1 = hx(h.hour + 1);
+    int hh = (int)(h.prob / 100.0f * rh);
+    if (hh > 0) { if (h.prob >= 50) epaper.fillRect(x0 + 1, ry + rh - hh, x1 - x0 - 2, hh, TFT_BLACK); else shade(x0 + 1, ry + rh - hh, x1 - x0 - 2, hh); }
+    if (h.hour % 3 == 1 && h.hour > 1) { snprintf(buf, sizeof(buf), "%d°", (int)lroundf(h.temp)); text(buf, (x0 + x1) / 2, ty, 18, MC_DATUM); }
+    int mid = h.hour * 60 + 30;
+    if (k0 >= 0 && k0 < 7 && (mid < X.sunrise[k0] || mid > X.sunset[k0])) epaper.fillRect(x0, sy, x1 - x0, 5, TFT_BLACK);
+  }
+  hline(AX, ry + rh, AW);
+  for (int hgrid = 0; hgrid <= 24; hgrid += 6) {
+    int x = hx(hgrid);
+    snprintf(buf, sizeof(buf), hgrid == 24 ? "24 Uhr" : "%d", hgrid);
+    text(buf, hgrid == 24 ? R : x, sy + 18, 18, hgrid == 0 ? ML_DATUM : (hgrid == 24 ? MR_DATUM : MC_DATUM));
+    if (hgrid > 0 && hgrid < 24) for (int y = cy; y < cy + ch; y += 5) epaper.drawPixel(x, y, TFT_BLACK);
+  }
+  // now marker and run window
+  for (int y = cy - 2; y < sy + 5; y += 2) epaper.drawPixel(nowX, y, TFT_BLACK);
+  epaper.fillTriangle(nowX - 5, cy - 8, nowX + 5, cy - 8, nowX, cy - 1, TFT_BLACK);
+  if (w) {
+    int x0 = hx(w->hour), x1 = hx(w->hour + 1);
+    epaper.drawRect(x0 - 1, cy - 4, x1 - x0 + 2, sy + 9 - cy, TFT_BLACK);
+    epaper.drawRect(x0 - 2, cy - 5, x1 - x0 + 4, sy + 11 - cy, TFT_BLACK);
+  }
+  hline(L, 374, R - L);
+
+  // ---- bottom: body, week, tonight
+  const int C2 = 282, C3 = 548;
+  vline(C2 - 12, 382, 90); vline(C3 - 12, 382, 90);
+  sectionLabel("KÖRPER", L, 392);
+  if (t.rhr > 0) {
+    snprintf(buf, sizeof(buf), "Ruhepuls %d", t.rhr);
+    text(buf, L, 418, 18);
+    if (m.rhrBaseline > 0) {
+      int d = t.rhr - m.rhrBaseline;
+      if (d == 0) strcpy(buf, "wie immer"); else snprintf(buf, sizeof(buf), "%d %s", abs(d), d > 0 ? "höher" : "tiefer");
+      text(buf, C2 - 24 - 16, 418, 18, MR_DATUM);
+      trendMark(C2 - 30, 418, (float)d, 1.5f);
+    }
+  }
+  if (t.sleepH > 0) {
+    fmtHours(b2, sizeof(b2), t.sleepH);
+    snprintf(buf, sizeof(buf), "Schlaf %s", b2);
+    text(buf, L, 442, 18);
+    bool inc = t.deepH == 0 && t.awakeH == 0;
+    if (inc) text("lückenhaft?", C2 - 24, 442, 18, MR_DATUM);
+    else if (m.sleepAvgH > 0) {
+      int dm = (int)lroundf((t.sleepH - m.sleepAvgH) * 60);
+      snprintf(buf, sizeof(buf), "%s%d min", dm >= 0 ? "+" : "-", abs(dm));
+      text(buf, C2 - 24, 442, 18, MR_DATUM);
+    }
+  } else if (!D.garminStatus[0]) text("Schlaf: Uhr nachts tragen", L, 442, 18);
+  statusMark(L + 8, 466, m.healthStatus);
+  text(m.healthText, L + 24, 466, 18, ML_DATUM, false, C2 - 24 - L - 24);
+
+  sectionLabel("WOCHE", C2, 392);
+  float km = m.weekKm[WEEKS_SHOWN - 1];
+  fmtDec(b2, sizeof(b2), km, 1);
+  snprintf(buf, sizeof(buf), "%s / %d km", b2, D.weeklyGoalKm);
+  text(buf, C3 - 24, 392, 18, MR_DATUM);
+  const int dw = (C3 - 24 - C2) / 7;
+  for (int d = 0; d < 7; d++) {
+    int cx = C2 + d * dw + dw / 2;
+    bool ran = m.runDaysThisWeek & (1 << d);
+    bool best = false;
+    for (int b = 0; b < 2; b++) if (X.bestDay[b] >= 0 && weekdayMon0(X.win[X.bestDay[b]].day) == d && X.win[X.bestDay[b]].day - D.todayNum < 7 - m.todayWeekday) best = true;
+    if (ran) invLabel(WD_SHORT[d], cx, 418);
+    else text(WD_SHORT[d], cx, 418, 18, MC_DATUM);
+    if (d == m.todayWeekday) epaper.drawRect(cx - 16, 404, 32, 28, TFT_BLACK);
+    if (best && !ran && d >= m.todayWeekday) epaper.fillTriangle(cx - 5, 439, cx + 5, 439, cx, 433, TFT_BLACK);
+  }
+  progressBar(C2, 443, C3 - 24 - C2, 10, km / (D.weeklyGoalKm > 0 ? D.weeklyGoalKm : 1));
+  if (X.bestDay[0] >= 0) {
+    const RunWindow& a = X.win[X.bestDay[0]];
+    if (X.bestDay[1] >= 0) {
+      const RunWindow& b = X.win[X.bestDay[1]];
+      snprintf(buf, sizeof(buf), "Am besten %s %d, %s %d Uhr", WD_SHORT[weekdayMon0(a.day)], a.hour, WD_SHORT[weekdayMon0(b.day)], b.hour);
+    } else snprintf(buf, sizeof(buf), "Am besten %s %d Uhr", WD_SHORT[weekdayMon0(a.day)], a.hour);
+    text(buf, C2, 468, 18, ML_DATUM, false, C3 - 24 - C2);
+  }
+
+  sectionLabel("HEUTE ABEND", C3, 392);
+  text(X.tipHead, C3, 420, 24, ML_DATUM, false, R - C3);
+  wrapText(X.tipBody, C3, 446, 18, R - C3, 22, 2);
+}
+
+// ================================================================= Coach SCREEN 2: body
+inline void drawBody(const DashboardData& D, const struct tm& now, int batteryPct) {
+  const Coach& X = D.c;
   const Metrics& m = D.m;
   const HealthToday& t = D.today;
-  char buf[64], b2[24];
-  drawHeader(D, now, SCREEN_HEALTH, "Gesundheit • 14 Tage", batteryPct);
-  const int L1 = 16, R1 = 384, L2 = 416, R2 = 784;
-  long firstDay = D.days[0].day;
-  vline(400, HEADER_H + 8, 334);
+  char buf[96], b2[24], b3[24];
+  drawHeader(D, now, 1, "Körper • 14 Tage", batteryPct);
+  const int L1 = 16, R1 = 384, L2 = 416, R2 = 784, N = 14;
+  long first = D.todayNum - (N - 1);
+  vline(400, HEADER_H + 8, 322);
+  auto nightFor = [&](long day) -> const CoachNight* { for (auto& n : X.nights) if (n.day == day) return &n; return nullptr; };
 
-  // P1 body battery range per day
-  panelTitle("Body Battery (Tief bis Hoch)", L1, 64);
+  // P1 sleep rhythm: one bar per night from falling asleep to waking up
+  int lo = 9999, hi = -1, cnt = 0;
+  for (long d = first; d <= D.todayNum; d++) if (auto n = nightFor(d)) { lo = std::min(lo, n->bedMin); hi = std::max(hi, n->bedMin); cnt++; }
+  if (cnt >= 2) { fmtClock(b2, sizeof(b2), lo); fmtClock(b3, sizeof(b3), hi); snprintf(buf, sizeof(buf), "ins Bett %s bis %s", b2, b3); }
+  else snprintf(buf, sizeof(buf), "%d Nächte mit Uhr", cnt);
+  panelTitle("Schlaf-Rhythmus", L1, 64, buf, R1);
   {
-    const int y = 80, h = 100, n = HEALTH_DAYS;
-    float slot = (float)(R1 - L1) / n;
-    dottedH(L1, y, R1 - L1, 6); dottedH(L1, y + h / 2, R1 - L1, 6); hline(L1, y + h, R1 - L1);
-    for (int i = 0; i < n; i++) {
-      const HealthDay& d = D.days[i];
-      if (d.bbMax < 0) continue;
-      int bx = L1 + (int)(i * slot) + 4, bw = (int)slot - 8;
-      int ytop = y + h - (int)(d.bbMax / 100.0f * h), ybot = y + h - (int)((d.bbMin < 0 ? 0 : d.bbMin) / 100.0f * h);
-      epaper.fillRect(bx, ytop, bw, ybot - ytop > 2 ? ybot - ytop : 2, TFT_BLACK);
+    const int y = 82, h = 106, gx = L1 + 28, gw = R1 - gx;
+    const int tMin = 540, tMax = 1380;            // 21:00 to 11:00, minutes after noon
+    auto ty = [&](int mAfterNoon) { return y + (int)((float)(mAfterNoon - tMin) / (tMax - tMin) * h); };
+    for (int hr : {720, 1080}) {                     // midnight and 6 o'clock
+      dottedH(gx, ty(hr), gw, 5);
+      snprintf(buf, sizeof(buf), "%d", ((hr + 720) % 1440) / 60);
+      text(buf, gx - 6, ty(hr), 18, MR_DATUM);
     }
-    dayAxis(L1, R1 - L1, y + h + 14, n, firstDay);
+    float slot = (float)gw / N;
+    for (int i = 0; i < N; i++) {
+      const CoachNight* n = nightFor(first + i);
+      int bx = gx + (int)(i * slot) + 5, bw = (int)slot - 10;
+      if (!n) continue;
+      int y0 = ty(std::max(tMin, n->bedMin)), y1 = ty(std::min(tMax, n->wakeMin));
+      if (n->incomplete()) { hatch(bx, y0, bw, y1 - y0); epaper.drawRect(bx, y0, bw, y1 - y0, TFT_BLACK); }
+      else epaper.fillRect(bx, y0, bw, y1 - y0, TFT_BLACK);
+    }
+    dayAxis(gx, gw, y + h + 14, N, first);
   }
 
-  // P2 sleep per night
-  if (m.sleepAvgH > 0) { fmtHours(b2, sizeof(b2), m.sleepAvgH); snprintf(buf, sizeof(buf), "Schnitt %s • Linie 8 h", b2); }
-  else snprintf(buf, sizeof(buf), "keine Nächte");
-  panelTitle("Schlaf pro Nacht", L2, 64, buf, R2);
+  // P2 overnight charge
+  snprintf(buf, sizeof(buf), "~%d Punkte je Stunde", (int)lroundf(X.chargePerHour));
+  panelTitle("Nacht-Aufladung", L2, 64, buf, R2);
   {
-    const int y = 80, h = 100, n = HEALTH_DAYS;
-    const float maxH = 10;
-    float slot = (float)(R2 - L2) / n;
+    const int y = 96, h = 92;
+    float slot = (float)(R2 - L2) / N;
     hline(L2, y + h, R2 - L2);
-    int goalY = y + h - (int)(8 / maxH * h);
-    dottedH(L2, goalY, R2 - L2, 3);
-    for (int i = 0; i < n; i++) {
-      const HealthDay& d = D.days[i];
-      if (d.sleepH <= 0) continue;
-      int bx = L2 + (int)(i * slot) + 4, bw = (int)slot - 8;
-      int hh = (int)(fminf(d.sleepH, maxH) / maxH * h);
-      epaper.fillRect(bx, y + h - hh, bw, hh, TFT_BLACK);
+    for (int i = 0; i < N; i++) {
+      const CoachNight* n = nightFor(first + i);
+      const CoachDay* d = coachDay(X, first + i);
+      if (!n || !d || d->charged <= 0) continue;
+      int bx = L2 + (int)(i * slot) + 3, bw = (int)slot - 6;
+      int hh = (int)(std::min(100, d->charged) / 100.0f * h);
+      if (n->incomplete()) { hatch(bx, y + h - hh, bw, hh); epaper.drawRect(bx, y + h - hh, bw, hh, TFT_BLACK); }
+      else epaper.fillRect(bx, y + h - hh, bw, hh, TFT_BLACK);
+      snprintf(buf, sizeof(buf), "%d", d->charged);
+      text(buf, bx + bw / 2, y + h - hh - 10, 18, MC_DATUM);
     }
-    dayAxis(L2, R2 - L2, y + h + 14, n, firstDay);
+    dayAxis(L2, R2 - L2, y + h + 14, N, first);
   }
-  hline(L1, 212, R2 - L1);
+  hline(L1, 214, R2 - L1);
 
-  // P3 resting HR
-  if (m.rhrBaseline > 0) snprintf(buf, sizeof(buf), "Basis %d", m.rhrBaseline); else snprintf(buf, sizeof(buf), "Basis ab 3 Nächten");
-  panelTitle("Ruhepuls", L1, 230, buf, R1);
+  // P3 resting heart rate, 30 days
+  if (m.rhrBaseline > 0 && t.rhr > 0) snprintf(buf, sizeof(buf), "normal %d • heute %d", m.rhrBaseline, t.rhr);
+  else snprintf(buf, sizeof(buf), "Basis ab 3 Nächten");
+  panelTitle("Ruhepuls • 30 Tage", L1, 232, buf, R1);
   {
-    const int y = 248, h = 96, n = HEALTH_DAYS;
-    float v[HEALTH_DAYS], lo = 1e9, hi = -1e9; int cnt = 0;
-    for (int i = 0; i < n; i++) {
-      v[i] = D.days[i].rhr > 0 ? (float)D.days[i].rhr : NAN;
-      if (!isnan(v[i])) { lo = fminf(lo, v[i]); hi = fmaxf(hi, v[i]); cnt++; }
+    const int y = 252, h = 92, n = 30, gx = L1 + 30, gw = R1 - gx;
+    float lo2 = 1e9, hi2 = -1e9;
+    std::vector<std::pair<int, int>> pts;
+    for (auto& d : X.days) {
+      int i = (int)(d.day - (D.todayNum - (n - 1)));
+      if (i < 0 || i >= n || d.rhr <= 0) continue;
+      pts.push_back({i, d.rhr}); lo2 = fminf(lo2, d.rhr); hi2 = fmaxf(hi2, d.rhr);
     }
-    if (cnt) {
-      lo = floorf(lo - 3); hi = ceilf(hi + 3);
-      float slot = (float)(R1 - L1 - 30) / n;
-      int px = -1, py = -1;
-      for (int i = 0; i < n; i++) {
-        if (isnan(v[i])) continue;
-        int cx = L1 + 30 + (int)(i * slot + slot / 2), cy = y + h - (int)((v[i] - lo) / (hi - lo) * h);
-        if (px >= 0) thickLine(px, py, cx, cy);
-        epaper.fillCircle(cx, cy, 4, TFT_BLACK);
-        px = cx; py = cy;
+    if (pts.size() >= 2) {
+      lo2 = floorf(lo2 - 3); hi2 = ceilf(hi2 + 3);
+      auto py = [&](float v) { return y + h - (int)((v - lo2) / (hi2 - lo2) * h); };
+      if (m.rhrBaseline > 0) dottedH(gx, py(m.rhrBaseline), gw, 3);
+      int px = -1, pyy = -1, pi = -99;
+      for (auto& p : pts) {
+        int cx = gx + (int)((p.first + 0.5f) * gw / n), cyy = py(p.second);
+        if (px >= 0 && p.first - pi <= 2) thickLine(px, pyy, cx, cyy);
+        else if (px >= 0) dashedLine(px, pyy, cx, cyy);
+        epaper.fillCircle(cx, cyy, 3, TFT_BLACK);
+        px = cx; pyy = cyy; pi = p.first;
       }
-      if (m.rhrBaseline > 0) dottedH(L1 + 30, y + h - (int)((m.rhrBaseline - lo) / (hi - lo) * h), R1 - L1 - 30, 3);
-      snprintf(buf, sizeof(buf), "%d", (int)hi); text(buf, L1, y + 6, 18);
-      snprintf(buf, sizeof(buf), "%d", (int)lo); text(buf, L1, y + h - 6, 18);
+      epaper.drawCircle(px, pyy, 7, TFT_BLACK);
+      snprintf(buf, sizeof(buf), "%d", (int)hi2); text(buf, L1, y + 6, 18);
+      snprintf(buf, sizeof(buf), "%d", (int)lo2); text(buf, L1, y + h - 6, 18);
+      text("vor 30 Tagen", gx, y + h + 14, 18);
+      text("heute", R1, y + h + 14, 18, MR_DATUM);
     } else text("noch keine Werte", L1, y + h / 2, 24);
   }
 
-  // P4 last night
-  panelTitle("Letzte Nacht", L2, 230);
-  if (t.sleepH > 0) {
-    char a[12], b[12], d[16];
-    fmtHours(d, sizeof(d), t.sleepH);
-    if (t.sleepStartMin >= 0 && t.sleepEndMin >= 0) {
-      snprintf(a, sizeof(a), "%02d:%02d", t.sleepStartMin / 60, t.sleepStartMin % 60);
-      snprintf(b, sizeof(b), "%02d:%02d", t.sleepEndMin / 60, t.sleepEndMin % 60);
-      snprintf(buf, sizeof(buf), "%s – %s  •  %s", a, b, d);
-    } else snprintf(buf, sizeof(buf), "%s", d);
-    text(buf, L2, 262, 24);
-    float tot = t.deepH + t.lightH + t.remH + t.awakeH;
-    int x = L2, bw = R2 - L2, y = 280, bh = 20;
-    float parts[4] = {t.deepH, t.lightH, t.remH, t.awakeH};
-    static const char* names[4] = {"Tief", "Leicht", "REM", "Wach"};
-    for (int k = 0; k < 4; k++) {
-      int pw = (int)lroundf(parts[k] / tot * bw);
-      if (k == 3) pw = L2 + bw - x;
-      if (k == 0) epaper.fillRect(x, y, pw, bh, TFT_BLACK);
-      else if (k == 1) hatch(x, y, pw, bh);
-      else if (k == 2) shade(x, y, pw, bh);
-      x += pw;
-    }
-    epaper.drawRect(L2, y, bw, bh, TFT_BLACK);
-    for (int k = 0; k < 4; k++) {
-      int sx = L2 + (k % 2) * 130, sy = 308 + (k / 2) * 21;
-      if (k == 0) epaper.fillRect(sx, sy, 12, 12, TFT_BLACK);
-      else if (k == 1) { hatch(sx, sy, 12, 12); epaper.drawRect(sx, sy, 12, 12, TFT_BLACK); }
-      else if (k == 2) { shade(sx, sy, 12, 12); epaper.drawRect(sx, sy, 12, 12, TFT_BLACK); }
-      else epaper.drawRect(sx, sy, 12, 12, TFT_BLACK);
-      snprintf(buf, sizeof(buf), "%s %d %%", names[k], (int)lroundf(parts[k] / tot * 100));
-      text(buf, sx + 18, sy + 6, 18);
-    }
-    if (t.resp > 0) {
-      fmtDec(b2, sizeof(b2), t.resp, 0);
-      if (m.respBaseline > 0) { char c[12]; fmtDec(c, sizeof(c), m.respBaseline, 1); snprintf(buf, sizeof(buf), "Atmung %s /min (Basis %s)", b2, c); }
-      else snprintf(buf, sizeof(buf), "Atmung %s /min", b2);
-      text(buf, L2, 362, 18, ML_DATUM, false, R2 - L2);
-    }
-  } else text("keine Schlafdaten", L2, 270, 24);
+  // P4 heart rate over the day
+  {
+    int lo3 = 999, hi3 = 0, loMin = 0;
+    for (auto& p : X.dayHr) { if (p.second < lo3) { lo3 = p.second; loMin = p.first; } hi3 = std::max(hi3, p.second); }
+    if (X.dayHr.size() >= 4) snprintf(buf, sizeof(buf), "Tief %d um %02d:%02d", lo3, loMin / 60, loMin % 60);
+    else buf[0] = 0;
+    panelTitle("Puls heute", L2, 232, buf, R2);
+    const int y = 252, h = 92, gx = L2 + 30, gw = R2 - gx;
+    if (X.dayHr.size() >= 4) {
+      float a = floorf((lo3 - 5) / 10.0f) * 10, b = ceilf((hi3 + 5) / 10.0f) * 10;
+      dottedH(gx, y, gw, 6); hline(gx, y + h, gw);
+      int px = -1, py = -1;
+      for (auto& p : X.dayHr) {
+        int cx = gx + (int)(p.first / 1440.0f * gw), cyy = y + h - (int)((p.second - a) / (b - a) * h);
+        if (px >= 0 && cx - px < 12) thickLine(px, py, cx, cyy);
+        px = cx; py = cyy;
+      }
+      snprintf(buf, sizeof(buf), "%d", (int)b); text(buf, L2, y + 6, 18);
+      snprintf(buf, sizeof(buf), "%d", (int)a); text(buf, L2, y + h - 6, 18);
+      text("0", gx, y + h + 14, 18); text("12", gx + gw / 2, y + h + 14, 18, MC_DATUM); text("24 Uhr", R2, y + h + 14, 18, MR_DATUM);
+    } else text("noch keine Werte", L2, y + h / 2, 24);
+  }
   hline(L1, 376, R2 - L1);
 
-  // bottom: stress, intensity minutes, check
-  const int by = 394;
-  sectionLabel("Stress heute", L1, by);
-  if (t.stressAvg >= 0) { snprintf(buf, sizeof(buf), "%d", t.stressAvg); text(buf, L1, by + 34, 32); }
-  else text("--", L1, by + 34, 32);
-  int s7 = 0, s7n = 0;
-  for (int i = HEALTH_DAYS - 7; i < HEALTH_DAYS; i++) if (D.days[i].stress >= 0) { s7 += D.days[i].stress; s7n++; }
-  if (s7n) { snprintf(buf, sizeof(buf), "7 Tage %d", s7 / s7n); text(buf, L1 + 70, by + 38, 18); }
-
-  sectionLabel("Intensität (Woche)", 230, by);
-  snprintf(buf, sizeof(buf), "%d / 150", m.intensityWeek);
-  text(buf, 230, by + 34, 32);
-  progressBar(230, by + 58, 250, 12, m.intensityWeek / 150.0f);
-
-  sectionLabel("Gesundheits-Check", 520, by);
-  if (m.healthStatus == 2) {
-    epaper.fillRoundRect(520, by + 18, R2 - 520, 34, 6, TFT_BLACK);
-    statusMark(534, by + 35, 2);
-    text(m.healthText, 548, by + 35, 18, ML_DATUM, true, R2 - 556);
-  } else {
-    statusMark(528, by + 35, m.healthStatus);
-    text(m.healthText, 544, by + 35, 18, ML_DATUM, false, R2 - 544);
+  // bottom: stress split, last night, what the dashboard has learned
+  const int B2 = 282, B3 = 548;
+  vline(B2 - 12, 384, 88); vline(B3 - 12, 384, 88);
+  sectionLabel("Stress heute", L1, 394);
+  if (t.stressAvg >= 0) { snprintf(buf, sizeof(buf), "%d", t.stressAvg); text(buf, B2 - 24, 394, 18, MR_DATUM); }
+  {
+    int tot = t.stressMin[0] + t.stressMin[1] + t.stressMin[2] + t.stressMin[3];
+    int x = L1, bw = B2 - 24 - L1, y = 410, bh = 16;
+    if (tot > 0) {
+      for (int k = 0; k < 4; k++) {
+        int pw = k == 3 ? L1 + bw - x : (int)lroundf((float)t.stressMin[k] / tot * bw);
+        if (k == 1) shade(x, y, pw, bh, 3); else if (k == 2) hatch(x, y, pw, bh); else if (k == 3) epaper.fillRect(x, y, pw, bh, TFT_BLACK);
+        x += pw;
+      }
+      epaper.drawRect(L1, y, bw, bh, TFT_BLACK);
+      snprintf(buf, sizeof(buf), "%d %% Ruhe", (int)lroundf(100.0f * t.stressMin[0] / tot));
+      text(buf, L1, 444, 18);
+      snprintf(buf, sizeof(buf), "%d min mittel bis hoch", t.stressMin[2] + t.stressMin[3]);
+      text(buf, L1, 466, 18, ML_DATUM, false, bw);
+    } else text("noch keine Werte", L1, 430, 18);
   }
-  if (m.bedAvgMin >= 0) {
-    int bm = (m.bedAvgMin + 720) % 1440;
-    snprintf(buf, sizeof(buf), "Einschlafen meist %02d:%02d", bm / 60, bm % 60);
-    text(buf, 520, by + 62, 18);
+  sectionLabel("Letzte Nacht", B2, 394);
+  if (t.sleepH > 0) {
+    fmtHours(b2, sizeof(b2), t.sleepH);
+    text(b2, B3 - 24, 394, 18, MR_DATUM);
+    float tot = t.deepH + t.lightH + t.remH + t.awakeH;
+    int x = B2, bw = B3 - 24 - B2, y = 410, bh = 16;
+    float parts[4] = {t.deepH, t.lightH, t.remH, t.awakeH};
+    for (int k = 0; k < 4; k++) {
+      int pw = k == 3 ? B2 + bw - x : (int)lroundf(parts[k] / tot * bw);
+      if (k == 0) epaper.fillRect(x, y, pw, bh, TFT_BLACK); else if (k == 1) hatch(x, y, pw, bh); else if (k == 2) shade(x, y, pw, bh);
+      x += pw;
+    }
+    epaper.drawRect(B2, y, bw, bh, TFT_BLACK);
+    snprintf(buf, sizeof(buf), "Tief %d %% • REM %d %%", (int)lroundf(t.deepH / tot * 100), (int)lroundf(t.remH / tot * 100));
+    text(buf, B2, 444, 18);
+    if (t.deepH == 0 && t.awakeH == 0) text("Messung lückenhaft?", B2, 466, 18);
+    else if (t.resp > 0) { fmtDec(b2, sizeof(b2), t.resp, 0); snprintf(buf, sizeof(buf), "Atmung %s /min", b2); text(buf, B2, 466, 18); }
+  } else text("Uhr nachts tragen", B2, 430, 18);
+
+  sectionLabel("Gelernt", B3, 394);
+  {
+    int n = (int)X.nights.size();
+    if (n < 14) snprintf(buf, sizeof(buf), "%d von 14 Nächten mit Uhr. Ab 14 zeige ich, was deinen Schlaf verbessert.", n);
+    else snprintf(buf, sizeof(buf), "Pro Stunde Schlaf lädst du ~%d Punkte, wach verlierst du ~%d je Stunde.",
+                  (int)lroundf(X.chargePerHour), (int)lroundf(X.drainPerHour));
+    wrapText(buf, B3, 420, 18, R2 - B3, 22, 3);
   }
 }
 
-// ================================================================= SCREEN 3
-inline void drawTraining(const DashboardData& D, const struct tm& now, int batteryPct) {
+// ================================================================= Coach SCREEN 3: running
+inline void drawRun(const DashboardData& D, const struct tm& now, int batteryPct) {
+  const Coach& X = D.c;
   const Metrics& m = D.m;
-  char buf[64], b2[24];
-  drawHeader(D, now, SCREEN_TRAINING, "Training", batteryPct);
-  const int L1 = 16, R1 = 384, L2 = 416, R2 = 784;
-  vline(400, HEADER_H + 8, 322);
+  char buf[96], b2[24], b3[24];
+  drawHeader(D, now, 2, "Laufen", batteryPct);
+  const int L1 = 16, R2 = 784, SP = 500;
+  const CoachRun* last = X.runs.empty() ? nullptr : &X.runs.back();
 
-  // P1 form chart
-  panelTitle("Form", L1, 64);
-  {  // inline legend: solid = fitness, dashed = fatigue
-    snprintf(buf, sizeof(buf), "Ermüdung %d", (int)lroundf(m.atl));
-    int x2 = R1 - textW(buf, 18);
-    text(buf, x2, 64, 18);
-    dashedLine(x2 - 26, 64, x2 - 6, 64);
-    snprintf(b2, sizeof(b2), "Fitness %d", (int)lroundf(m.ctl));
-    int x1 = x2 - 40 - textW(b2, 18) - 14;
-    text(b2, x1, 64, 18);
-    trendMark(x1 + textW(b2, 18) + 9, 64, m.ctl - m.ctlWeekAgo, 0.5f);
-    thickLine(x1 - 26, 64, x1 - 6, 64);
-  }
+  // P1 last run: pace, heart rate and elevation over the distance
+  if (last) {
+    fmtDayShort(b2, sizeof(b2), last->day);
+    fmtDec(b3, sizeof(b3), last->km, 1);
+    char p[12];
+    fmtPace(p, sizeof(p), last->minutes * 60 / (last->km > 0 ? last->km : 1));
+    snprintf(buf, sizeof(buf), "%s  %s km • %s /km • Puls %d", b2, b3, p, last->avgHr);
+    text(buf, L1, 64, 18, ML_DATUM, false, SP - 16 - L1 - 100);
+    text(last->type, SP - 16, 64, 18, MR_DATUM);
+  } else text("Noch kein Lauf mit der Uhr", L1, 64, 18);
   {
-    const int y = 84, h = 96;
-    float hi = 10;
-    for (int i = 0; i < CHART_LOAD_DAYS; i++) hi = fmaxf(hi, fmaxf(m.ctlSeries[i], m.atlSeries[i]));
-    hi = ceilf(hi / 10) * 10;
-    dottedH(L1, y, R1 - L1, 6); hline(L1, y + h, R1 - L1);
-    lineChart(L1, y, R1 - L1, h, m.ctlSeries, CHART_LOAD_DAYS, 0, hi);
-    lineChart(L1, y, R1 - L1, h, m.atlSeries, CHART_LOAD_DAYS, 0, hi, true);
-    snprintf(buf, sizeof(buf), "%d", (int)hi); text(buf, L1 + 2, y + 10, 18);
-    text("vor 6 Wochen", L1, y + h + 14, 18);
-    text("heute", R1, y + h + 14, 18, MR_DATUM);
+    const int gx = L1 + 44, gw = SP - 16 - gx - 34, y = 84, h = 100;
+    int n = (int)X.runKm.size();
+    std::vector<float> ps, hs, as;
+    if (n >= 10 && last && X.runDay == last->day)
+      for (int i = 0; i < n; i++) { if (!isnan(X.runPace[i])) ps.push_back(X.runPace[i]); if (!isnan(X.runHr[i])) hs.push_back(X.runHr[i]); if (!isnan(X.runAlt[i])) as.push_back(X.runAlt[i]); }
+    if (ps.size() >= 10 && !hs.empty()) {
+      std::sort(ps.begin(), ps.end()); std::sort(hs.begin(), hs.end()); std::sort(as.begin(), as.end());
+      float pLo = floorf(ps[ps.size() / 10] / 30) * 30 - 30, pHi = ceilf(ps[ps.size() * 9 / 10] / 30) * 30 + 30;  // fast, slow
+      float hLo = floorf(hs[hs.size() / 20] / 10) * 10 - 10, hHi = ceilf(hs.back() / 10) * 10;
+      float aLo = as.empty() ? 0 : as.front(), aHi = as.empty() ? 1 : fmaxf(as.back(), aLo + 20);
+      float total = X.runKm.back();
+      auto smooth = [&](const std::vector<float>& v, int r) {
+        std::vector<float> o(v.size(), NAN);
+        for (int i = 0; i < (int)v.size(); i++) {
+          float sum = 0; int c = 0;
+          for (int j = i - r; j <= i + r; j++) if (j >= 0 && j < (int)v.size() && !isnan(v[j])) { sum += v[j]; c++; }
+          if (c > r && !isnan(v[i])) o[i] = sum / c;
+        }
+        return o;
+      };
+      std::vector<float> pace = smooth(X.runPace, 4), hr = smooth(X.runHr, 3);
+      auto cx = [&](int i) { return gx + (int)(X.runKm[i] / total * gw); };
+      // elevation as light area in the lower third
+      for (int i = 0; i < n; i++) {
+        if (isnan(X.runAlt[i])) continue;
+        int top = y + h - 3 - (int)((X.runAlt[i] - aLo) / (aHi - aLo) * (h / 4));
+        int x0 = cx(i), x1 = i + 1 < n ? cx(i + 1) : x0 + 2;
+        shade(x0, top, x1 - x0 + 1, y + h - top, 4);
+      }
+      dottedH(gx, y, gw, 6); hline(gx, y + h, gw);
+      int px = -1, py = -1, qx = -1, qy = -1;
+      for (int i = 0; i < n; i++) {
+        if (!isnan(hr[i])) {
+          int yy = y + h - (int)((fminf(fmaxf(hr[i], hLo), hHi) - hLo) / (hHi - hLo) * h);
+          if (qx >= 0) epaper.drawLine(qx, qy, cx(i), yy, TFT_BLACK);  // thin = heart rate
+          qx = cx(i); qy = yy;
+        }
+        if (isnan(pace[i])) { px = -1; continue; }
+        float pv = fminf(fmaxf(pace[i], pLo), pHi);
+        int yy = y + (int)((pv - pLo) / (pHi - pLo) * h);   // faster = higher
+        if (px >= 0) thickLine(px, py, cx(i), yy);
+        px = cx(i); py = yy;
+      }
+      fmtPace(b2, sizeof(b2), pLo); text(b2, gx - 6, y + 6, 18, MR_DATUM);
+      fmtPace(b2, sizeof(b2), pHi); text(b2, gx - 6, y + h - 6, 18, MR_DATUM);
+      snprintf(buf, sizeof(buf), "%d", (int)hHi); text(buf, gx + gw + 6, y + 6, 18);
+      snprintf(buf, sizeof(buf), "%d", (int)hLo); text(buf, gx + gw + 6, y + h - 6, 18);
+      for (int k = 0; k <= (int)total; k += 2) {
+        int x = gx + (int)(k / total * gw);
+        vline(x, y + h, 4);
+        snprintf(buf, sizeof(buf), "%d", k);
+        text(buf, x, y + h + 14, 18, MC_DATUM);
+      }
+      text("km", gx - 14, y + h + 14, 18, MR_DATUM);
+      // legend
+      int lx = gx;
+      thickLine(lx, 218, lx + 22, 218); text("Pace", lx + 28, 218, 18); lx += 28 + textW("Pace", 18) + 22;
+      hline(lx, 218, 22); text("Puls", lx + 28, 218, 18); lx += 28 + textW("Puls", 18) + 22;
+      shade(lx, 212, 22, 12, 4); epaper.drawRect(lx, 212, 22, 12, TFT_BLACK); text("Höhe", lx + 28, 218, 18);
+    } else text("Verlauf nach dem nächsten Lauf", gx, y + h / 2, 18);
   }
+  vline(SP, HEADER_H + 8, 180);
 
-  // P2 weekly km
-  snprintf(buf, sizeof(buf), "Ziel %d km", D.weeklyGoalKm);
-  panelTitle("Wochen-km", L2, 64, buf, R2);
+  // P2 heart-rate zones of the last 14 days
   {
-    const int y = 92, h = 88, n = WEEKS_SHOWN;
-    float hi = (float)D.weeklyGoalKm * 1.2f;
+    const int X0 = SP + 16;
+    float z[5] = {0, 0, 0, 0, 0}, tot = 0; int runs = 0;
+    for (auto& r : X.runs) if (D.todayNum - r.day <= 14) { runs++; for (int i = 0; i < 5; i++) { z[i] += r.zoneMin[i]; tot += r.zoneMin[i]; } }
+    snprintf(buf, sizeof(buf), "%d Läufe, 14 Tage", runs);
+    panelTitle("Pulszonen", X0, 64, runs ? buf : "keine Läufe", R2);
+    float mx = 1;
+    for (int i = 0; i < 5; i++) mx = fmaxf(mx, z[i]);
+    const int bx = X0 + 112, bw = R2 - bx - 62;
+    for (int i = 4; i >= 0; i--) {
+      int y = 86 + (4 - i) * 23;
+      if (i < 4) snprintf(buf, sizeof(buf), "Z%d %d–%d", i + 1, X.zoneFloor[i], X.zoneFloor[i + 1]);
+      else snprintf(buf, sizeof(buf), "Z5 ab %d", X.zoneFloor[4]);
+      text(buf, X0, y, 18);
+      int w = (int)(z[i] / mx * bw);
+      if (w > 0) epaper.fillRect(bx, y - 7, w, 14, TFT_BLACK);
+      else vline(bx, y - 7, 14);
+      snprintf(buf, sizeof(buf), "%d min", (int)lroundf(z[i]));
+      text(buf, R2, y, 18, MR_DATUM);
+    }
+    if (tot > 0) {
+      int hard = (int)lroundf((z[2] + z[3] + z[4]) / tot * 100);
+      if (hard >= 50) snprintf(buf, sizeof(buf), "%d %% ab Zone 3: zu hart", hard);
+      else if (z[3] + z[4] < 0.05f * tot && runs >= 4) snprintf(buf, sizeof(buf), "Kaum Zone 4–5: Tempo fehlt");
+      else snprintf(buf, sizeof(buf), "%d %% locker: gute Mischung", 100 - hard);
+      text(buf, X0, 212, 18, ML_DATUM, false, R2 - X0);
+    }
+  }
+  hline(L1, 236, R2 - L1);
+
+  // P3 weekly km
+  const int R1 = 384, L2 = 416;
+  snprintf(buf, sizeof(buf), "Ziel %d km • Fitness %d", D.weeklyGoalKm, (int)lroundf(m.ctl));
+  panelTitle("Wochen-km", L1, 254, buf, R1);
+  {
+    const int y = 280, h = 62, n = WEEKS_SHOWN;
+    float hi = (float)D.weeklyGoalKm * 1.15f;
     for (int i = 0; i < n; i++) hi = fmaxf(hi, m.weekKm[i]);
-    float slot = (float)(R2 - L2) / n;
-    hline(L2, y + h, R2 - L2);
-    int gy = y + h - (int)(D.weeklyGoalKm / hi * h);
-    dottedH(L2, gy, R2 - L2, 3);
+    float slot = (float)(R1 - L1) / n;
+    hline(L1, y + h, R1 - L1);
+    dottedH(L1, y + h - (int)(D.weeklyGoalKm / hi * h), R1 - L1, 3);
     for (int i = 0; i < n; i++) {
-      int bx = L2 + (int)(i * slot) + 6, bw = (int)slot - 12;
+      int bx = L1 + (int)(i * slot) + 6, bw = (int)slot - 12;
       int hh = (int)(m.weekKm[i] / hi * h);
-      if (hh > 0) { if (i == n - 1) shade(bx, y + h - hh, bw, hh); else epaper.fillRect(bx, y + h - hh, bw, hh, TFT_BLACK); }
-      if (i == n - 1) epaper.drawRect(bx, y + h - hh, bw, hh > 0 ? hh : 1, TFT_BLACK);
-      snprintf(buf, sizeof(buf), "%d", (int)lroundf(m.weekKm[i]));
-      if (m.weekKm[i] > 0) text(buf, bx + bw / 2, y + h - hh - 10, 18, MC_DATUM);
+      if (hh > 0) { if (i == n - 1) { shade(bx, y + h - hh, bw, hh); epaper.drawRect(bx, y + h - hh, bw, hh, TFT_BLACK); } else epaper.fillRect(bx, y + h - hh, bw, hh, TFT_BLACK); }
+      if (m.weekKm[i] > 0) { snprintf(buf, sizeof(buf), "%d", (int)lroundf(m.weekKm[i])); text(buf, bx + bw / 2, y + h - hh - 10, 18, MC_DATUM); }
       char iso[11]; isoFromDayNumber(m.weekStart[i], iso);
-      snprintf(buf, sizeof(buf), "%d.%d", atoi(iso + 8), atoi(iso + 5));
+      snprintf(buf, sizeof(buf), "%d.%d.", atoi(iso + 8), atoi(iso + 5));
       if (i % 2 == 1) text(buf, bx + bw / 2, y + h + 14, 18, MC_DATUM);
     }
   }
-  hline(L1, 212, R2 - L1);
+  vline(400, 244, 122);
 
-  // P3 last runs
-  panelTitle("Letzte Läufe", L1, 230);
+  // P4 last runs with efficiency (metres per heartbeat)
   {
-    int y = 258, shown = 0;
-    static const int cx[5] = {L1, L1 + 110, L1 + 180, L1 + 250, L1 + 310};
-    text("km", cx[1] + 40, y, 18, MR_DATUM); text("Pace", cx[2] + 52, y, 18, MR_DATUM);
-    text("Puls", cx[3] + 44, y, 18, MR_DATUM); text("TE", R1, y, 18, MR_DATUM);
-    hline(L1, y + 12, R1 - L1);
-    y += 30;
-    for (int i = D.actN - 1; i >= 0 && shown < 4; i--) {
-      const Activity& a = D.acts[i];
-      if (!a.run) continue;
-      fmtDayShort(buf, sizeof(buf), a.day); text(buf, cx[0], y, 18);
-      fmtDec(b2, sizeof(b2), a.km, 1); text(b2, cx[1] + 40, y, 18, MR_DATUM);
-      fmtPace(b2, sizeof(b2), a.minutes * 60 / (a.km > 0 ? a.km : 1)); text(b2, cx[2] + 52, y, 18, MR_DATUM);
-      snprintf(b2, sizeof(b2), "%d", a.avgHr); text(a.avgHr ? b2 : "-", cx[3] + 44, y, 18, MR_DATUM);
-      fmtDec(b2, sizeof(b2), a.te, 1); text(a.te > 0 ? b2 : "-", R1, y, 18, MR_DATUM);
-      y += 26; shown++;
+    const int y0 = 254;
+    static const int c[5] = {L2, L2 + 138, L2 + 196, L2 + 244, L2 + 300};
+    text("Läufe", c[0], y0, 18); text("km", c[1], y0, 18, MR_DATUM); text("Pace", c[2], y0, 18, MR_DATUM);
+    text("Puls", c[3], y0, 18, MR_DATUM); text("m/Schlag", R2, y0, 18, MR_DATUM);
+    hline(L2, y0 + 12, R2 - L2);
+    int y = y0 + 30, shown = 0;
+    for (int i = (int)X.runs.size() - 1; i >= 0 && shown < 4; i--, shown++, y += 24) {
+      const CoachRun& r = X.runs[i];
+      fmtDayShort(buf, sizeof(buf), r.day); text(buf, c[0], y, 18);
+      fmtDec(b2, sizeof(b2), r.km, 1); text(b2, c[1], y, 18, MR_DATUM);
+      fmtPace(b2, sizeof(b2), r.minutes * 60 / (r.km > 0 ? r.km : 1)); text(b2, c[2], y, 18, MR_DATUM);
+      snprintf(b2, sizeof(b2), "%d", r.avgHr); text(r.avgHr ? b2 : "-", c[3], y, 18, MR_DATUM);
+      if (r.avgHr > 0 && r.minutes > 0) { fmtDec(b2, sizeof(b2), r.km * 1000 / r.minutes / r.avgHr, 2); text(b2, R2, y, 18, MR_DATUM); }
     }
-    if (!shown) text("Noch kein Lauf mit der Uhr", L1, y, 18);
+    if (!shown) text("Noch kein Lauf mit der Uhr", L2, y, 18);
   }
+  hline(L1, 370, R2 - L1);
 
-  // P4 predictions
-  panelTitle("Prognose", L2, 230, "aus Pace + Puls, 6 Wochen", R2);
-  if (m.predN) {
-    int y = 264;
-    for (int k = 0; k < m.predN; k++) {
-      text(m.pred[k].label, L2, y, 24);
-      fmtDuration(buf, sizeof(buf), m.pred[k].seconds);
-      text(buf, R2, y, 24, MR_DATUM);
-      y += 28;
+  // bottom: running weather for 7 days, best hour per day
+  {
+    float slot = (float)(R2 - L1) / 7;
+    for (int k = 0; k < 7; k++) {
+      int x = L1 + (int)(k * slot), cxm = x + (int)(slot / 2);
+      const RunWindow& w = X.win[k];
+      long day = X.wxFirstDay + k;
+      bool best = k == X.bestDay[0] || k == X.bestDay[1];
+      const char* name = day == D.todayNum ? "Heute" : WD_LONG[weekdayMon0(day)];
+      char shortName[16];
+      snprintf(shortName, sizeof(shortName), "%s", day == D.todayNum ? "Heute" : WD_SHORT[weekdayMon0(day)]);
+      (void)name;
+      if (best) invLabel(shortName, cxm, 390, 24); else text(shortName, cxm, 390, 24, MC_DATUM);
+      if (w.hour >= 0) {
+        snprintf(buf, sizeof(buf), "%d–%d Uhr", w.hour, w.hour + 1);
+        text(buf, cxm, 418, 18, MC_DATUM);
+        snprintf(buf, sizeof(buf), "%d° • %d %%", (int)lroundf(w.temp), w.prob);
+        text(buf, cxm, 440, 18, MC_DATUM);
+      } else text("vorbei", cxm, 418, 18, MC_DATUM);
+      // rain probability 6-22 h as mini bars
+      const int sx = x + 8, sw = (int)slot - 16, sy = 454, sh = 16;
+      hline(sx, sy + sh, sw);
+      for (auto& hh : X.hours) {
+        if (hh.day != day || hh.hour < 6 || hh.hour >= 22) continue;
+        int x0 = sx + (hh.hour - 6) * sw / 16, x1 = sx + (hh.hour - 5) * sw / 16;
+        int bh = (int)(hh.prob / 100.0f * sh);
+        if (bh > 0) { if (hh.prob >= 50) epaper.fillRect(x0, sy + sh - bh, x1 - x0 - 1, bh, TFT_BLACK); else shade(x0, sy + sh - bh, x1 - x0 - 1, bh); }
+        if (hh.hour == w.hour) epaper.fillTriangle((x0 + x1) / 2 - 4, sy + sh + 7, (x0 + x1) / 2 + 4, sy + sh + 7, (x0 + x1) / 2, sy + sh + 2, TFT_BLACK);
+      }
+      if (k > 0) vline(x, 380, 92);
     }
-  } else {
-    text("Noch zu wenig Daten", L2, 270, 24);
-    text("Ab dem ersten Lauf über 20 min", L2, 300, 18);
-    text("mit Puls erscheinen hier", L2, 324, 18);
-    text("Zeiten für 5 km bis Marathon.", L2, 348, 18);
   }
-  hline(L1, 376, R2 - L1);
-
-  // bottom: 3-day weather
-  const Weather& w = D.wx;
-  if (w.ok) {
-    for (int k = 1; k < w.dayN && k <= 3; k++) {
-      int x = L1 + (k - 1) * 260;
-      drawIcon64(x, 390, w.dCode[k]);
-      text(WD_LONG[weekdayMon0(w.dDay[k])], x + 74, 400, 24);
-      snprintf(buf, sizeof(buf), "%d° / %d°", (int)lroundf(w.tMin[k]), (int)lroundf(w.tMax[k]));
-      text(buf, x + 74, 430, 24);
-      snprintf(buf, sizeof(buf), "Regen %d %%", w.pMax[k]);
-      text(buf, x + 74, 458, 18);
-    }
-  } else text("Wetter nicht verfügbar", L1, 430, 24);
 }
 
 inline void drawScreen(int screen, const DashboardData& D, const struct tm& now, int batteryPct) {
   epaper.fillScreen(TFT_WHITE);
-  if (screen == SCREEN_HEALTH) drawHealth(D, now, batteryPct);
-  else if (screen == SCREEN_TRAINING) drawTraining(D, now, batteryPct);
-  else drawOverview(D, now, batteryPct);
+  if (screen == SCREEN_HEALTH) drawBody(D, now, batteryPct);
+  else if (screen == SCREEN_TRAINING) drawRun(D, now, batteryPct);
+  else drawToday(D, now, batteryPct);
 }

@@ -10,6 +10,8 @@
  */
 #pragma once
 #include <math.h>
+#include <algorithm>
+#include <vector>
 #include "model.h"
 
 inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -82,7 +84,7 @@ inline void computeHealth(DashboardData& D) {
   const HealthToday& t = D.today;
   if (m.rhrBaseline < 0 || t.rhr < 0) {
     m.healthStatus = -1;
-    snprintf(m.healthText, sizeof(m.healthText), "Basiswerte: %d von 3 Nächten", m.baselineNights);
+    snprintf(m.healthText, sizeof(m.healthText), "Basis: %d von 3 Nächten", m.baselineNights);
     return;
   }
   int dRhr = t.rhr - m.rhrBaseline;
@@ -221,9 +223,14 @@ inline void computeWeatherAdvice(DashboardData& D) {
   }
 
   // dry until / rain from
-  int rainAt = -1;
-  for (int i = 0; i < w.hourN && i < 24; i++) if (w.prob[i] >= 50) { rainAt = i; break; }
-  if (rainAt == 0) snprintf(m.rainText, sizeof(m.rainText), "Regen jetzt");
+  int rainAt = -1, first = -1;   // the hourly list starts at midnight
+  for (int i = 0; i < w.hourN; i++) {
+    if (w.hourDay[i] < D.todayNum || (w.hourDay[i] == D.todayNum && w.hourOfDay[i] < nowHour)) continue;
+    if (first < 0) first = i;
+    if (i - first >= 24) break;
+    if (w.prob[i] >= 50) { rainAt = i; break; }
+  }
+  if (rainAt >= 0 && rainAt == first) snprintf(m.rainText, sizeof(m.rainText), "Regen jetzt");
   else if (rainAt > 0) snprintf(m.rainText, sizeof(m.rainText), "trocken bis %02d:00", w.hourOfDay[rainAt]);
   else snprintf(m.rainText, sizeof(m.rainText), "trocken (24 h)");
 
@@ -289,9 +296,181 @@ inline void computeRecommendation(DashboardData& D) {
   }
 }
 
+// ================================================================= coach
+// Personal rates, running windows for the week, the sentence for today and the
+// lever for tonight. Works on the longer history in D.c (model.h).
+static const char* WEEKDAY_NAME[7] = {"Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"};
+inline float medianF(std::vector<float> v) {
+  if (v.empty()) return NAN;
+  std::sort(v.begin(), v.end());
+  return v.size() % 2 ? v[v.size() / 2] : (v[v.size() / 2 - 1] + v[v.size() / 2]) / 2;
+}
+inline int afterNoon(int minOfDay) { return (minOfDay + 720) % 1440; }
+inline void fmtClock(char* out, size_t n, int minAfterNoon) {
+  int m = (minAfterNoon + 720) % 1440;
+  snprintf(out, n, "%02d:%02d", m / 60, m % 60);
+}
+
+// ----------------------------------------------------------------- coach logic
+inline const CoachDay* coachDay(const Coach& X, long day) {
+  for (auto& d : X.days) if (d.day == day) return &d;
+  return nullptr;
+}
+
+inline void computeCoach(DashboardData& D) {
+  Coach& X = D.c;
+  const Metrics& m = D.m;
+  // runs and strength days from the activity list
+  X.runs.clear();
+  X.strengthDays.clear();
+  for (int i = 0; i < D.actN; i++) {
+    const Activity& a = D.acts[i];
+    if (a.strength) X.strengthDays.push_back(a.day);
+    if (!a.run) continue;
+    CoachRun r;
+    r.day = a.day; r.km = a.km; r.minutes = a.minutes; r.te = a.te; r.anTe = a.anTe;
+    r.avgHr = a.avgHr; r.maxHr = a.maxHr;
+    for (int z = 0; z < 5; z++) r.zoneMin[z] = a.zoneMin[z];
+    strcpy(r.type, a.type);
+    X.runs.push_back(r);
+  }
+  for (auto& w : X.win) w = RunWindow();
+  X.bestDay[0] = X.bestDay[1] = -1;
+  X.coachHead[0] = X.coachBody[0] = X.tipHead[0] = X.tipBody[0] = 0;
+  X.bbBedProjected = -1;
+  X.chargePerHour = 9.5f; X.drainPerHour = 4.0f;
+  X.usualBed = X.usualWake = -1;
+
+  const HealthToday& t = D.today;
+  // personal rates from nights with the watch on
+  std::vector<float> rate, drain, bed, wake;
+  for (auto& n : X.nights) {
+    bed.push_back(n.bedMin);
+    wake.push_back(n.wakeMin);
+    const CoachDay* d = coachDay(X, n.day);
+    if (!d || n.sleepH < 3) continue;
+    if (d->charged > 0 && d->bbMax < 100) rate.push_back(d->charged / n.sleepH);
+    if (d->drained > 0 && d->day != D.todayNum) drain.push_back(d->drained / (24 - n.sleepH));
+  }
+  if (rate.size() >= 3) X.chargePerHour = medianF(rate);
+  if (drain.size() >= 3) X.drainPerHour = medianF(drain);
+  if (bed.size() >= 3) { X.usualBed = (int)medianF(bed); X.usualWake = (int)medianF(wake); }
+
+  // running windows for 7 days (same scoring as the firmware)
+  int nowHour = D.nowMin / 60;
+  for (auto& h : X.hours) {
+    int k = (int)(h.day - X.wxFirstDay);
+    if (k < 0 || k > 6 || h.hour < 7 || h.hour > 20) continue;
+    if (h.day == D.todayNum && h.hour < nowHour) continue;
+    int mid = h.hour * 60 + 30;
+    bool dark = mid < X.sunrise[k] || mid > X.sunset[k];
+    float score = h.prob + h.precip * 40 + (dark ? 35 : 0) + (h.wind > 25 ? 15 : 0) + fabsf(h.feels - 10) * 1.2f;
+    if (score < X.win[k].score) X.win[k] = {h.day, h.hour, h.temp, h.feels, h.wind, score, h.prob, dark};
+  }
+  std::vector<int> order;
+  for (int k = 0; k < 7; k++) if (X.win[k].hour >= 0) order.push_back(k);
+  std::sort(order.begin(), order.end(), [&](int a, int b) { return X.win[a].score < X.win[b].score; });
+  for (int i = 0; i < 2 && i < (int)order.size(); i++) X.bestDay[i] = order[i];
+  if (X.bestDay[1] >= 0 && X.bestDay[0] > X.bestDay[1]) std::swap(X.bestDay[0], X.bestDay[1]);
+
+  // ---- coach sentence: the one thing with the biggest effect today
+  const CoachRun* last = X.runs.empty() ? nullptr : &X.runs.back();
+  float z[5] = {0, 0, 0, 0, 0}, zTot = 0;
+  int recent = 0, base = 0;
+  for (auto& r : X.runs) {
+    if (D.todayNum - r.day > 14) continue;
+    recent++;
+    if (!strcmp(r.type, "Grundlage") || !strcmp(r.type, "Erholung") || !strcmp(r.type, "Ausdauer")) base++;
+    for (int i = 0; i < 5; i++) { z[i] += r.zoneMin[i]; zTot += r.zoneMin[i]; }
+  }
+  float hardShare = zTot > 0 ? (z[2] + z[3] + z[4]) / zTot : 0;
+  bool nightOk = t.sleepH > 0 && !(t.deepH == 0 && t.awakeH == 0) && t.sleepH >= 3;
+  int bb = t.bbWake > 0 ? t.bbWake : t.bbHigh;
+  bool tired = (bb >= 0 && bb < 35) || (nightOk && t.sleepH < 5.5f);
+  float kmWeek = m.weekKm[WEEKS_SHOWN - 1], kmPrev = m.weekKm[WEEKS_SHOWN - 2];
+  char wd[16] = "";
+  if (last) snprintf(wd, sizeof(wd), "%s", WEEKDAY_NAME[weekdayMon0(last->day)]);
+
+  if (D.garminStatus[0]) {
+    strcpy(X.coachHead, "Heute nach Gefühl");
+    snprintf(X.coachBody, sizeof(X.coachBody), "Garmin: %s. Lauf, wie es sich gut anfühlt.", D.garminStatus);
+  } else if (m.healthStatus == 2) {
+    strcpy(X.coachHead, "Heute Pause");
+    strcpy(X.coachBody, "Ruhepuls und Atmung sind erhöht. Ein Tag Ruhe kostet nichts.");
+  } else if (m.daysSinceRun == 0) {
+    strcpy(X.coachHead, "Für heute erledigt");
+    strcpy(X.coachBody, "Der Lauf ist drin. Besser wirst du jetzt in der Erholung.");
+  } else if (last && D.todayNum - last->day == 1 && (last->te >= 3.5f || last->anTe >= 2)) {
+    strcpy(X.coachHead, "Heute locker oder Pause");
+    snprintf(X.coachBody, sizeof(X.coachBody),
+             "Gestern war fordernd. Dein Körper baut jetzt auf, lass ihn.");
+  } else if (tired) {
+    strcpy(X.coachHead, "Heute Pause oder Spaziergang");
+    strcpy(X.coachBody, "Wenig Energie im Tank. Morgen läuft es dafür besser.");
+  } else if (kmPrev > 10 && kmWeek > kmPrev * 1.4f) {
+    strcpy(X.coachHead, "Heute lieber Pause");
+    snprintf(X.coachBody, sizeof(X.coachBody),
+             "Schon %d km mehr als letzte Woche. Sehnen wachsen langsam.", (int)(kmWeek - kmPrev));
+  } else if (last && recent >= 1 && hardShare >= 0.5f) {
+    snprintf(X.coachHead, sizeof(X.coachHead), "Heute locker, Puls unter %d", X.zoneFloor[2]);
+    float lastHard = last->zoneMin[2] + last->zoneMin[3] + last->zoneMin[4];
+    snprintf(X.coachBody, sizeof(X.coachBody),
+             "Am %s liefen %d von %d min ab Zone 3. Langsamer baut mehr Grundlage auf.", wd, (int)lroundf(lastHard), (int)lroundf(last->minutes));
+  } else if (recent >= 4 && base == recent && bb >= 70) {
+    strcpy(X.coachHead, "Zeit für Tempo");
+    snprintf(X.coachBody, sizeof(X.coachBody),
+             "Deine letzten %d Läufe waren locker. 6 x 3 min zügig stärken das Herz.", recent);
+  } else {
+    snprintf(X.coachHead, sizeof(X.coachHead), "%s", m.recTitle);
+    snprintf(X.coachBody, sizeof(X.coachBody), "%s. Locker laufen baut Grundlage auf.", m.recReason);
+  }
+
+  // ---- evening lever: earlier to bed
+  if (X.usualBed >= 0 && t.bbNow >= 0) {
+    int nowRel = D.nowMin < 5 * 60 ? D.nowMin + 720 : D.nowMin - 720;   // minutes after noon, negative in the morning
+    auto wakeBb = [&](int bedAfterNoon) {
+      float awakeH = (bedAfterNoon - nowRel) / 60.0f;
+      if (awakeH < 0) awakeH = 0;
+      float atBed = fmaxf(5, t.bbNow - X.drainPerHour * awakeH);
+      float sleepH = (X.usualWake - bedAfterNoon) / 60.0f - 0.3f;
+      return fminf(100, atBed + X.chargePerHour * sleepH);
+    };
+    X.bbBedProjected = (int)fmaxf(5, t.bbNow - X.drainPerHour * fmaxf(0, (X.usualBed - nowRel) / 60.0f));
+    float usual = wakeBb(X.usualBed);
+    int target = -1;
+    for (int b = X.usualBed - 30; b >= X.usualBed - 150 && b >= 600; b -= 30) {  // not before 22:00
+      int snapped = b / 30 * 30;
+      if (wakeBb(snapped) - usual >= 10) { target = snapped; break; }
+    }
+    if (target >= 0) {
+      char c[8];
+      fmtClock(c, sizeof(c), target);
+      snprintf(X.tipHead, sizeof(X.tipHead), "%s ins Bett", c);
+      snprintf(X.tipBody, sizeof(X.tipBody), "Dann startest du morgen mit ~%d statt ~%d.",
+               (int)lroundf(wakeBb(target) / 5) * 5, (int)lroundf(usual / 5) * 5);
+    }
+  }
+  if (!X.tipHead[0] && X.nights.size() >= 4) {
+    int lo = 9999, hi = -1, n = 0;
+    for (auto& nn : X.nights) if (D.todayNum - nn.day < 14) { lo = std::min(lo, nn.bedMin); hi = std::max(hi, nn.bedMin); n++; }
+    if (n >= 4 && hi - lo >= 120) {
+      char a[8], b[8];
+      fmtClock(a, sizeof(a), lo); fmtClock(b, sizeof(b), hi);
+      strcpy(X.tipHead, "Feste Schlafenszeit");
+      snprintf(X.tipBody, sizeof(X.tipBody), "Mal %s, mal %s. Gleiche Zeit lädt besser.", a, b);
+    }
+  }
+  if (!X.tipHead[0]) {
+    strcpy(X.tipHead, "Alles im Lot");
+    strcpy(X.tipBody, "Heute gibt es nichts zu verbessern.");
+  }
+}
+
 inline void computeAll(DashboardData& D) {
   computeHealth(D);
   computeTraining(D);
   computeWeatherAdvice(D);
   computeRecommendation(D);
+  computeCoach(D);
 }
+
