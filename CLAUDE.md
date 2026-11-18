@@ -47,7 +47,7 @@ Ergebnis der Firmware-Screens: `emulator/out/all_screens.png`. Meldet Textüberl
 - Abrufe je Zyklus: Tageswerte, letzte Nacht, Body Battery, Tages- und Schlafliste (`COACH_DAYS` = 30, die Schlafliste lehnt längere Zeiträume mit HTTP 400 ab), Aktivitäten (`ACTIVITY_DAYS`), Tagespuls; Pulszonen einmal am Tag, FIT-Datei nur bei neuem Lauf.
 - Garmin Connect Personal API: `POST .../personal-api-key/token` mit `Authorization: ApiKey <key>` → JWT (24 h), dann `Bearer`. Nur lesend, kein HRV/VO2max/Training Load. `Accept: */*` nötig (sonst 406).
 - Open-Meteo (frei, ohne Key), Ort Würzburg.
-- Keine Strava-API (kostenpflichtig). Garmin-Daten vor 20.07.2026 stammen von einer anderen Person und dürfen nicht verwendet werden (`GARMIN_FIRST_DAY` in `config.h`, gilt für Firmware und `fetch_data.py`).
+- Keine Strava-API (kostenpflichtig).
 
 ## Regeln
 

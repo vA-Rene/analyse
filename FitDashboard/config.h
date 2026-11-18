@@ -32,10 +32,9 @@
 // --- Analysis windows ---
 #define HEALTH_DAYS      14   // days shown on the body screen
 #define COACH_DAYS       30   // days of daily values and nights loaded (the sleep list allows about 30)
-#define ACTIVITY_DAYS    180  // days of activities loaded
+#define ACTIVITY_DAYS    120  // days of activities loaded
 #define LOAD_DAYS        56   // days of activities used for fitness/fatigue
-// Garmin data before this day is ignored (e.g. a watch that had another owner). "" = no limit.
-#define GARMIN_FIRST_DAY "2026-07-20"
+#define GARMIN_FIRST_DAY ""   // optional "YYYY-MM-DD": ignore Garmin data before this day; "" = no limit
 #define CHART_LOAD_DAYS  42   // days shown in the form chart
 #define WEEKS_SHOWN      8    // weeks in the weekly-km chart
 
