@@ -12,6 +12,8 @@
  *
  * Buttons: KEY1 = refresh data, KEY2 = next screen, KEY3 = previous screen,
  *          5x quick press on any key = setup portal (Wi-Fi, Garmin key, location).
+ * Coach screen: KEY1 = wait for a question from the phone (phone.h). The phone also carries
+ *          the requests to the AI service, with a key that stays on the phone. Any key cancels.
  * Detail screens return to screen 1 after SCREEN_RETURN_MS (config.h).
  *
  * Arduino IDE: Board "XIAO_ESP32S3_PLUS", PSRAM "OPI PSRAM",
@@ -30,6 +32,8 @@
 #include <Preferences.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <ESPmDNS.h>
+#include <esp_random.h>
 #include <esp_sleep.h>
 #include <driver/gpio.h>
 #include "driver.h"
@@ -54,6 +58,9 @@ EPaper epaper;
 #include "https_tls13.h"
 #include "unzip.h"
 #include "ota.h"
+#include "kit.h"
+#include "coach.h"
+#include "phone.h"
 
 // =========================================================================
 // Settings (setup portal values in Preferences override config/secrets)
@@ -93,6 +100,18 @@ bool portalCountdownActive = false;
 unsigned long portalCountdownStart = 0;
 int lastCountdownSecond = -1;
 
+// --- Coach (coach.h): one more screen after the fixed ones. The question comes from the phone, and the
+// phone carries the requests to the AI service: the key for it never reaches the display (phone.h) ---
+const int SCREEN_COACH = SCREEN_COUNT;
+#define COACH_HINT "KEY1: ask by phone"
+static const char* const COACH_QUESTION_LIST[] = COACH_QUESTIONS;
+const int COACH_QUESTION_COUNT = sizeof(COACH_QUESTION_LIST) / sizeof(COACH_QUESTION_LIST[0]);
+std::string coachScreen;      // the last answer as a drawable spec; empty = nothing asked yet
+bool needsCoachAsk = false;
+WebServer phoneServer(80);    // the page for the phone (phone.h); listens only while the display waits for the phone
+phone::Window phoneWindow;
+int screenCount() { return SCREEN_COUNT + 1; }
+
 String garminToken;
 long garminTokenTime = 0;
 
@@ -110,6 +129,7 @@ void loadSettings() {
     prefs.putString("pass", SECRET_WIFI_PASSWORD);
   }
   if (!prefs.isKey("garminKey") && strlen(SECRET_GARMIN_API_KEY)) prefs.putString("garminKey", SECRET_GARMIN_API_KEY);
+  if (prefs.isKey("geminiKey")) prefs.remove("geminiKey");   // builds before the phone carried the key kept it here
   prefs.end();
   prefs.begin("fit_cfg", true);
   cfg.ssid = prefs.getString("ssid", SECRET_WIFI_SSID);
@@ -141,6 +161,7 @@ void turnOffWiFi() {
 bool connectWiFi(unsigned long timeoutMs = 20000) {
   if (WiFi.status() == WL_CONNECTED) return true;
   if (cfg.ssid.length() == 0) return false;
+  WiFi.setHostname(PHONE_HOSTNAME);   // the name the router lists the display under
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.begin(cfg.ssid.c_str(), cfg.password.c_str());
@@ -410,10 +431,142 @@ void showScreen(bool cleanCycle) {
   struct tm now;
   getLocalTime(&now, 100);
   computeNow();  // recommendation and weather window depend on the time
-  drawScreen(currentScreen, D, now, batteryPercent());
+  if (currentScreen == SCREEN_COACH) drawCoachScreen(now);
+  else drawScreen(currentScreen, D, now, batteryPercent());
   epaper.update();
   clockRefreshCount = 0;
   lastDay = now.tm_mday;
+#endif
+}
+
+// =========================================================================
+// Coach: a question to the LLM, one drawn screen back (coach.h, kit.h)
+// =========================================================================
+void drawCoachScreen(const struct tm& now) {
+  if (!coachScreen.empty()) coach::coachRedraw(coachScreen);
+  else phone::introScreen(D, now);
+}
+
+void coachFailed(const char* why) {
+  turnOffWiFi();
+  showMessage("Coach", why);
+  delay(2500);
+  lastScreenChange = millis();
+  needsScreenUpdate = true;   // back to the coach screen as it was
+}
+
+// =========================================================================
+// Phone (phone.h): a web page in the home Wi-Fi sends the question and carries
+// the coach's requests to the AI service
+// =========================================================================
+void phoneRequest() {
+  HTTPMethod m = phoneServer.method();
+  phone::Reply r = phone::handle(m == HTTP_GET ? "GET" : m == HTTP_POST ? "POST" : "", phoneServer.uri().c_str(),
+                                 phoneServer.header(PHONE_HEADER).c_str(), phoneServer.arg("q").c_str(), phoneServer.arg("plain").c_str(),
+                                 phoneWindow, millis(), COACH_QUESTION_LIST, COACH_QUESTION_COUNT);
+  phoneServer.sendHeader("Cache-Control", "no-store");
+  phoneServer.send(r.status, r.type, r.body.c_str());
+}
+
+void setupPhoneServer() {
+  static const char* headers[] = {PHONE_HEADER};
+  phoneServer.collectHeaders(headers, 1);
+  phoneServer.on("/", HTTP_GET, phoneRequest);
+  phoneServer.on("/ping", HTTP_GET, phoneRequest);
+  phoneServer.on("/ask", HTTP_POST, phoneRequest);
+  phoneServer.on("/job", HTTP_GET, phoneRequest);
+  phoneServer.on("/answer", HTTP_POST, phoneRequest);
+  phoneServer.onNotFound(phoneRequest);
+}
+
+// The three buttons while the phone window has the loop: which one went down since the last look.
+struct PhoneButtons {
+  bool sel = digitalRead(BUTTON_SELECT), next = digitalRead(BUTTON_NEXT), prev = digitalRead(BUTTON_PREV);
+  int pressed() {   // 1 = KEY1, 2 = KEY2, 3 = KEY3, 0 = none
+    bool s = digitalRead(BUTTON_SELECT), n = digitalRead(BUTTON_NEXT), p = digitalRead(BUTTON_PREV);
+    int key = 0;
+    if ((sel == HIGH && s == LOW) || (next == HIGH && n == LOW) || (prev == HIGH && p == LOW)) {
+      delay(40);    // a real press is still down after the bounce
+      if (digitalRead(BUTTON_SELECT) == LOW) key = 1;
+      else if (digitalRead(BUTTON_NEXT) == LOW) key = 2;
+      else if (digitalRead(BUTTON_PREV) == LOW) key = 3;
+    }
+    sel = s; next = n; prev = p;
+    return key;
+  }
+};
+
+// KEY1 on the coach screen: joins the Wi-Fi, shows the address of the page and waits for a question
+// (PHONE_WINDOW_MS, longer while someone is typing on the page). With the question the coach starts:
+// every request it has for the AI service is handed to the phone, which sends it with its key and
+// brings the reply back (one to three times), then the answer is drawn. A key on the display stops
+// all of it: KEY1 back to the coach screen as it was, KEY2/KEY3 to the next screen.
+// No light sleep in here: Wi-Fi has to stay on.
+void listenForPhone() {
+#ifdef EPAPER_ENABLE
+  if (!connectWiFi()) { coachFailed("Kein WLAN"); return; }
+  struct tm now;
+  getLocalTime(&now, 100);
+  computeNow();
+  bool named = MDNS.begin(PHONE_HOSTNAME);
+  if (named) MDNS.addService("http", "tcp", 80);
+  phoneServer.begin();
+  phone::waitScreen(D, now, named ? PHONE_HOSTNAME ".local" : "", WiFi.localIP().toString().c_str());
+  epaper.update();
+  clockRefreshCount = 0;
+  phoneWindow.open(millis(), ((unsigned long long)esp_random() << 32) | esp_random());   // the time runs from the moment the address is readable
+
+  PhoneButtons buttons;
+  int key = 0;                  // the button that stopped it
+  while (!key && phoneWindow.question.empty() && phoneWindow.isOpen(millis())) {
+    phoneServer.handleClient();
+    key = buttons.pressed();
+    delay(10);
+  }
+
+  bool drawn = false;           // an answer, or the reason why there is none, is in the display buffer
+  if (!key && !phoneWindow.question.empty()) {
+    const std::string question = phoneWindow.question;
+    phone::workingScreen(D, now, question);
+    epaper.update();
+    coach::PostFn post = [&](const std::string& body, std::string& answer) {
+      phoneWindow.offer(body, millis());
+      while (!key && phoneWindow.waiting(millis())) {
+        phoneServer.handleClient();
+        key = buttons.pressed();
+        delay(5);
+      }
+      if (key || !phoneWindow.answered) return PHONE_LOST;
+      answer.swap(phoneWindow.reply);
+      Serial.printf("[Coach] request %d: HTTP %d, %u bytes out, %u back\n", phoneWindow.job, phoneWindow.status, (unsigned)body.size(), (unsigned)answer.size());
+      return phoneWindow.status;
+    };
+    coach::CoachResult r = coach::coachAsk(D, now, question, post, COACH_HINT, [](int round, const std::string&, const coach::Problems& problems) {
+      Serial.printf("[Coach] round %d: %u problems\n", round, (unsigned)problems.size());
+      for (auto& p : problems) Serial.printf("[Coach]   %s\n", p.c_str());
+    });
+    if (!key) {
+      if (r.httpStatus == PHONE_LOST) r.screen = phone::lostScreen(D, now, question, COACH_HINT);
+      coachScreen = r.screen;
+      drawn = true;
+      phoneWindow.finish(r.answered);
+      for (unsigned long t = millis(); !phoneWindow.told && millis() - t < 2500;) { phoneServer.handleClient(); delay(5); }   // the page asks about once a second how it went
+    }
+  }
+  for (unsigned long t = millis(); millis() - t < 300;) { phoneServer.handleClient(); delay(5); }   // let the last reply reach the phone
+  phoneServer.stop();
+  if (named) MDNS.end();
+  turnOffWiFi();
+  lastStateSel = digitalRead(BUTTON_SELECT); lastStateNext = digitalRead(BUTTON_NEXT); lastStatePrev = digitalRead(BUTTON_PREV);
+  lastButtonPress = millis();
+  rapidPressCount = 0;
+  lastScreenChange = millis();
+  if (drawn) {
+    epaper.update();
+    clockRefreshCount = 0;
+  } else if (key == 2) changeScreen(1);
+  else if (key == 3) changeScreen(-1);
+  else needsScreenUpdate = true;   // nobody asked, or KEY1 stopped it: back to the coach screen as it was
 #endif
 }
 
@@ -553,7 +706,7 @@ void updatePortalCountdown() {
 // Buttons (edge detection, debounce, 5x quick press = setup portal)
 // =========================================================================
 void changeScreen(int direction) {
-  currentScreen = (currentScreen + direction + SCREEN_COUNT) % SCREEN_COUNT;
+  currentScreen = (currentScreen + direction + screenCount()) % screenCount();
   lastScreenChange = millis();
   needsScreenUpdate = true;
 }
@@ -583,7 +736,7 @@ void handleButtons() {
       portalCountdownStart = millis();
     } else if (sPrev == LOW) changeScreen(-1);
     else if (sNext == LOW) changeScreen(1);
-    else if (sSel == LOW) needsDataRefresh = true;
+    else if (sSel == LOW) { if (currentScreen == SCREEN_COACH) needsCoachAsk = true; else needsDataRefresh = true; }
   }
   lastStatePrev = sPrev; lastStateNext = sNext; lastStateSel = sSel;
 }
@@ -607,6 +760,7 @@ void setup() {
   analogSetPinAttenuation(BATTERY_PIN, ADC_11db);
   setenv("TZ", TIMEZONE_POSIX, 1);
   tzset();
+  setupPhoneServer();
 
 #ifdef EPAPER_ENABLE
   epaper.begin();
@@ -639,6 +793,11 @@ void loop() {
     needsDataRefresh = false;
     needsScreenUpdate = true;
   }
+  if (needsCoachAsk) {
+    needsCoachAsk = false;
+    needsScreenUpdate = false;
+    listenForPhone();
+  }
   if (needsScreenUpdate && rapidPressCount == 0) {
     showScreen(true);
     needsScreenUpdate = false;
@@ -658,7 +817,7 @@ void loop() {
     lastMinute = now.tm_min;
     if (now.tm_mday != lastDay) {
       showScreen(true);  // new day: dates, week and charts change
-    } else if (!needsScreenUpdate) {
+    } else if (!needsScreenUpdate && currentScreen != SCREEN_COACH) {   // the coach screen has its clock elsewhere
       updateClockPartial(now);
       // after three partial clock updates, redraw the whole image once (no black/white cycle)
       if (++clockRefreshCount >= 3) showScreen(false);

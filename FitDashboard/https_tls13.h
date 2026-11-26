@@ -113,10 +113,12 @@ inline int httpsRead(HttpsConn& c, uint8_t* buf, size_t n) {
 }
 
 // Connect, send one request with "Connection: close" and read the headers.
-// method = "GET" or "POST" (empty body). Returns the HTTP status or
+// method = "GET" or "POST". `extraHeaders` are complete lines ending in \r\n; `body` is sent with POST.
+// Returns the HTTP status or
 // -1 connect, -2 TLS handshake, -3 send, -4 no/invalid answer, -5 out of memory.
 // Call httpsClose() afterwards in every case.
-inline int httpsOpen(HttpsConn& c, const char* host, const char* method, const String& path, const String& auth) {
+inline int httpsOpen(HttpsConn& c, const char* host, const char* method, const String& path, const String& auth,
+                     const String& extraHeaders = "", const char* body = nullptr, size_t bodyLen = 0) {
   c.status = -1; c.contentLength = -1; c.location = "";
   if (!tlsInit()) return c.status = -2;
   c.client.setTimeout(20);
@@ -139,9 +141,15 @@ inline int httpsOpen(HttpsConn& c, const char* host, const char* method, const S
   // "Accept: application/json" with HTTP 406
   req += "\r\nAccept: */*\r\nUser-Agent: FitDashboard/1.0\r\n";
   if (auth.length()) { req += "Authorization: "; req += auth; req += "\r\n"; }
-  if (strcmp(method, "POST") == 0) req += "Content-Length: 0\r\n";
+  req += extraHeaders;
+  if (strcmp(method, "POST") == 0) { req += "Content-Length: "; req += String((unsigned long)bodyLen); req += "\r\n"; }
   req += "Connection: close\r\n\r\n";
   if (wolfSSL_write(c.ssl, req.c_str(), req.length()) != (int)req.length()) return c.status = -3;
+  for (size_t sent = 0; body && sent < bodyLen;) {   // in pieces: one TLS record holds 16 kB at most
+    int n = wolfSSL_write(c.ssl, body + sent, (int)(bodyLen - sent > 8192 ? 8192 : bodyLen - sent));
+    if (n <= 0) return c.status = -3;
+    sent += n;
+  }
 
   // read until the end of the headers (HTTP/1.0 -> no chunked encoding)
   const size_t HEAD_CAP = 16384;
@@ -187,10 +195,11 @@ inline int httpsOpenUrl(HttpsConn& c, String url, const String& auth = "") {
 }
 
 // One request, whole answer in PSRAM. Errors as httpsOpen().
-inline HttpsResponse httpsRequest(const char* host, const char* method, const String& path, const String& auth) {
+inline HttpsResponse httpsRequest(const char* host, const char* method, const String& path, const String& auth,
+                                  const String& extraHeaders = "", const char* body = nullptr, size_t bodyLen = 0) {
   HttpsResponse r;
   HttpsConn c;
-  r.status = httpsOpen(c, host, method, path, auth);
+  r.status = httpsOpen(c, host, method, path, auth, extraHeaders, body, bodyLen);
   if (r.status < 0) { httpsClose(c); return r; }
   size_t cap = c.contentLength > 0 ? (size_t)c.contentLength + 1024 : 16384, len = 0;
   char* buf = (char*)heap_caps_malloc(cap + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);

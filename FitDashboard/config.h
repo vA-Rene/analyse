@@ -38,9 +38,32 @@
 #define CHART_LOAD_DAYS  42   // days shown in the form chart
 #define WEEKS_SHOWN      8    // weeks in the weekly-km chart
 
+// --- Coach (coach.h): an LLM answers questions about your data with one drawn screen ---
+// The coach screen comes after the three fixed screens. The kit has no microphone and the display
+// holds no key for the AI service: the question comes from the phone, and the phone sends the
+// coach's requests to the AI service with a Gemini key kept in its browser (below). These fixed
+// questions are offered on the phone's page to tap.
+#define COACH_MODEL      "gemini-3.5-flash-lite"
+#define COACH_ROUNDS     3    // LLM calls at most per question, including corrections
+#define COACH_QUESTIONS  { "How was my sleep this week?", \
+                           "Am I training too much? Should I rest tomorrow?", \
+                           "How is my training split across heart rate zones this month?", \
+                           "What does my week look like so far?", \
+                           "Is my fitness improving?" }
+
+// --- Phone as the microphone (phone.h) ---
+// KEY1 on the coach screen: the display joins the Wi-Fi and serves a page for the phone's browser.
+// There the phone's keyboard turns speech into text, and the page sends it to the display. The page
+// asks for a Gemini API key once (https://aistudio.google.com), keeps it in the browser and has a
+// button that deletes it. Use a key with a quota: who is in your Wi-Fi could get at it.
+#define PHONE_HOSTNAME       "fitdash"               // the page is at http://fitdash.local (letters, digits, hyphen)
+#define PHONE_WINDOW_MS      (90UL * 1000UL)         // the display waits this long for a question, Wi-Fi on
+#define PHONE_WINDOW_MAX_MS  (5UL * 60UL * 1000UL)   // and at most this long while someone is typing on the page
+#define PHONE_QUESTION_MAX   300                     // characters of a question
+
 // --- Firmware version and over-the-air updates (ota.h, tools/ota_release.py) ---
-#define FW_VERSION        "1.0.1"   // shown on the start screen and in the setup portal
-#define FW_BUILD          2         // +1 for every release; devices only install a higher build
+#define FW_VERSION        "1.1.0"   // shown on the start screen and in the setup portal
+#define FW_BUILD          3         // +1 for every release; devices only install a higher build
 // Checked on every data fetch (hourly and KEY1). Empty string = updates off.
 #define OTA_MANIFEST_URL  "https://github.com/vA-Rene/analyse/releases/latest/download/version.json"
 #define OTA_MIN_BATTERY   30        // % battery needed to start an update

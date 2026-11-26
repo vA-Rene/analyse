@@ -4,3 +4,4 @@ __pycache__/
 release/
 emulator/
 CLAUDE.local.md
+.env

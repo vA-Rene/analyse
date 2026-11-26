@@ -221,6 +221,8 @@ inline int parseActivities(const JsonDocument& doc, DashboardData& D) {
     const char* type = a["activityType"]["typeKey"] | "";
     x.run = strstr(type, "running") != nullptr;
     x.strength = strstr(type, "strength") != nullptr;
+    strcpy(x.sport, x.run ? "run" : x.strength ? "strength" : (strstr(type, "cycling") || strstr(type, "biking") || strstr(type, "ride")) ? "bike"
+                    : strstr(type, "swim") ? "swim" : "other");
     strncpy(x.name, a["activityName"] | "", sizeof(x.name) - 1);
     x.km = jsonFloat(a["distance"], 0) / 1000.0f;
     float sec = jsonFloat(a["movingDuration"], 0);

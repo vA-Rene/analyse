@@ -94,6 +94,7 @@ struct Activity {
   float anTe = 0;             // anaerobic training effect
   float zoneMin[5] = {0, 0, 0, 0, 0};  // minutes in heart-rate zones 1-5
   bool strength = false;
+  char sport[10] = "other";   // run, bike, swim, strength or other
   char type[12] = "";         // kind of run from Garmin's training-effect label
   float best5k = 0, best10k = 0, bestHalf = 0;  // fastest splits inside the run, seconds
   float load = 0;             // TRIMP (metrics.h)
